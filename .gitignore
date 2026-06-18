@@ -1,0 +1,6 @@
+*.exe
+.gocache/
+icogenerator/
+*.log
+*.json
+.env

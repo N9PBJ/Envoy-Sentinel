@@ -5,7 +5,7 @@ import (
 	"drlistener/internal/detector"
 	_ "embed"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"time"
 
@@ -27,6 +27,9 @@ var battery100 []byte
 //go:embed alert.ico
 var alertICO []byte
 
+//go:embed outage.ico
+var outageICO []byte
+
 var (
 	mSOC     *systray.MenuItem
 	mBattery *systray.MenuItem
@@ -37,6 +40,8 @@ var (
 )
 
 func batteryBucket(soc float64) int {
+	// Icons are available at 0, 33, 66, and 100 percent. Midpoints make the
+	// selected icon the closest visual representation of the actual SOC.
 	switch {
 	case soc < 16.5:
 		return 0 // 0%
@@ -53,6 +58,8 @@ func batteryBucket(soc float64) int {
 }
 
 func batteryStatus(w float64) string {
+	// Gateway normalization uses positive battery power for discharge and
+	// negative power for charge. Ignore +/-100 W as measurement noise/idle.
 	switch {
 	case w > 100:
 		return fmt.Sprintf("Battery: %.1f kW Discharging", w/1000)
@@ -61,6 +68,23 @@ func batteryStatus(w float64) string {
 	default:
 		return "Battery: Idle"
 	}
+}
+
+func gridStatus(outage bool, mainRelayState int, powerW float64) string {
+	if outage {
+		return "Grid: OUTAGE — Islanded"
+	}
+	if mainRelayState == 3 {
+		return "Grid: Reconnecting"
+	}
+	return fmt.Sprintf("Grid: %.1f kW", powerW/1000)
+}
+
+func gridTooltip(outage bool, powerW float64) string {
+	if outage {
+		return "OUTAGE"
+	}
+	return fmt.Sprintf("%.1fkW", powerW/1000)
 }
 
 func trayUpdater() {
@@ -73,7 +97,7 @@ func trayUpdater() {
 
 	var flash bool
 
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -83,7 +107,17 @@ func trayUpdater() {
 
 		socBucket := batteryBucket(s.SOC)
 
-		if s.State == detector.Active {
+		// An outage takes visual priority over a DR event. Flashing against the
+		// battery icon preserves SOC visibility while still attracting attention.
+		if s.GridOutage {
+			flash = !flash
+
+			if flash {
+				systray.SetIcon(outageICO)
+			} else {
+				systray.SetIcon(icons[socBucket])
+			}
+		} else if s.State == detector.Active {
 			flash = !flash
 
 			if flash {
@@ -105,9 +139,7 @@ func trayUpdater() {
 
 		mBattery.SetTitle(batteryStatus(s.BatteryPowerW))
 
-		mGrid.SetTitle(
-			fmt.Sprintf("Grid: %.1f kW", s.GridPowerW/1000),
-		)
+		mGrid.SetTitle(gridStatus(s.GridOutage, s.MainRelayState, s.GridPowerW))
 
 		mSolar.SetTitle(
 			fmt.Sprintf("Solar: %.1f kW", s.PVPowerW/1000),
@@ -119,80 +151,14 @@ func trayUpdater() {
 
 		systray.SetTooltip(
 			fmt.Sprintf(
-				"SOC %.0f%% | Grid %.1fkW | DR Event %s",
+				"SOC %.0f%% | Grid %s | DR Event %s",
 				s.SOC,
-				s.GridPowerW/1000,
+				gridTooltip(s.GridOutage, s.GridPowerW),
 				s.State,
 			),
 		)
 	}
 }
-
-// func trayUpdater() {
-// 	var (
-// 		icons = [][]byte{
-// 			battery0,
-// 			battery33,
-// 			battery66,
-// 			battery100,
-// 			alertICO,
-// 		}
-
-// 		lastSOC   = -1
-// 		lastState detector.State
-// 		flash     bool
-// 	)
-
-// 	ticker := time.NewTicker(5 * time.Second)
-
-// 	for range ticker.C {
-// 		statusMu.RLock()
-// 		s := Status
-// 		statusMu.RUnlock()
-
-// 		socBucket := batteryBucket(s.SOC)
-
-// 		if socBucket != lastSOC || s.State != lastState {
-// 			log.Printf("updating tray icon to SOC %d", socBucket)
-
-// 			systray.SetIcon(icons[batteryBucket(Status.SOC)])
-
-// 			lastSOC = socBucket
-// 			lastState = s.State
-// 		}
-
-// 		mDREvent.SetTitle(
-// 			fmt.Sprintf("DR Event: %s", s.State),
-// 		)
-
-// 		mSOC.SetTitle(
-// 			fmt.Sprintf("SOC: %.0f%%", s.SOC),
-// 		)
-
-// 		mBattery.SetTitle(batteryStatus(s.BatteryPowerW))
-
-// 		mGrid.SetTitle(
-// 			fmt.Sprintf("Grid: %.1f kW", s.GridPowerW/1000),
-// 		)
-
-// 		mSolar.SetTitle(
-// 			fmt.Sprintf("Solar: %.1f kW", s.PVPowerW/1000),
-// 		)
-
-// 		mHouse.SetTitle(
-// 			fmt.Sprintf("House: %.1f kW", s.LoadPowerW/1000),
-// 		)
-
-// 		systray.SetTooltip(
-// 			fmt.Sprintf(
-// 				"SOC %.0f%% | Grid %.1fkW | DR Event %s",
-// 				s.SOC,
-// 				s.GridPowerW/1000,
-// 				s.State,
-// 			),
-// 		)
-// 	}
-// }
 
 func onReady(cancel context.CancelFunc) {
 	systray.SetIcon(battery100)
@@ -237,7 +203,7 @@ func onReady(cancel context.CancelFunc) {
 				).Start()
 
 				if err != nil {
-					log.Printf("open config: %v", err)
+					slog.Error("open config", "error", err)
 				}
 			}
 		}

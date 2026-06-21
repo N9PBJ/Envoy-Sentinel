@@ -7,6 +7,9 @@ import (
 	"drlistener/internal/gateway"
 )
 
+// State describes the detector's current position in the DR-event state
+// machine. Suspect states provide hysteresis so a single noisy sample cannot
+// send a notification.
 type State string
 
 const (
@@ -74,6 +77,8 @@ type Snapshot struct {
 }
 
 func DefaultConfig(reserveSOC int) Config {
+	// These are intentionally conservative heuristics, not values supplied by
+	// Enphase. See README.md for the evidence and timing behind each threshold.
 	return Config{
 		ReserveSOC:             float64(reserveSOC),
 		StartDischargeW:        1000,
@@ -164,7 +169,7 @@ func (d *Detector) Observe(sample gateway.Sample) Result {
 			d.state = SuspectEnded
 			d.suspectEndedAt = sample.At
 			result.State = d.state
-			result.Reason = "battery discharge fell below end threshold or SOC reached reserve"
+			result.Reason = d.endEvidenceReason(sample)
 		}
 	case SuspectEnded:
 		if d.isEventLikeDischarge(sample) {
@@ -235,9 +240,17 @@ func (d *Detector) eventLikeReason(sample gateway.Sample) string {
 
 func (d *Detector) shouldSuspectEnded(sample gateway.Sample) bool {
 	atReserve := sample.SOC <= d.cfg.ReserveSOC+d.cfg.ReserveMarginSOC
-	lowDischarge := sample.BatteryPowerW < d.cfg.EndDischargeW
+	// Once a confirmed event reaches reserve, an idle battery is not evidence
+	// that the event ended. A DR command can keep the battery pinned there and
+	// force surplus PV to the grid. At reserve, wait for positive evidence that
+	// normal control has returned: sustained battery charging. Above reserve,
+	// the original sustained-low-discharge rule remains useful.
+	endEvidence := sample.BatteryPowerW < d.cfg.EndDischargeW
+	if atReserve {
+		endEvidence = sample.BatteryPowerW <= -d.cfg.EndDischargeW
+	}
 
-	if lowDischarge {
+	if endEvidence {
 		if d.lowDischargeSince.IsZero() {
 			d.lowDischargeSince = sample.At
 		}
@@ -245,8 +258,14 @@ func (d *Detector) shouldSuspectEnded(sample gateway.Sample) bool {
 		d.lowDischargeSince = time.Time{}
 	}
 
-	lowLongEnough := !d.lowDischargeSince.IsZero() && sample.At.Sub(d.lowDischargeSince) >= d.cfg.LowDischargeFor
-	return atReserve || lowLongEnough
+	return !d.lowDischargeSince.IsZero() && sample.At.Sub(d.lowDischargeSince) >= d.cfg.LowDischargeFor
+}
+
+func (d *Detector) endEvidenceReason(sample gateway.Sample) string {
+	if sample.SOC <= d.cfg.ReserveSOC+d.cfg.ReserveMarginSOC {
+		return "battery resumed sustained charging at reserve"
+	}
+	return "battery discharge remained below end threshold"
 }
 
 func (d *Detector) addHistory(sample gateway.Sample) {
@@ -283,6 +302,8 @@ func (d *Detector) addDischargeEnergy(sample gateway.Sample) {
 		return
 	}
 	hours := sample.At.Sub(d.lastSample.At).Hours()
+	// A gap over an hour likely means the process or gateway was unavailable;
+	// integrating across it would invent energy from an unobserved interval.
 	if hours <= 0 || hours > 1 {
 		return
 	}

@@ -4,3 +4,5 @@ icogenerator/
 *.log
 *.json
 .env
+debug/
+local-gateway.pdf

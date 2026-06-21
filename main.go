@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"slices"
@@ -16,6 +16,7 @@ import (
 	"drlistener/internal/detector"
 	"drlistener/internal/gateway"
 	"drlistener/internal/notify"
+	"drlistener/internal/outage"
 	"drlistener/internal/state"
 
 	"github.com/getlantern/systray"
@@ -25,13 +26,18 @@ import (
 const configFile = ".env"
 
 var (
+	// Status is the most recent normalized gateway reading. pollOnce writes it
+	// under statusMu; the tray updater takes a snapshot under the same lock so
+	// network polling never blocks on Windows UI work.
 	Status struct {
-		SOC           float64
-		State         detector.State
-		BatteryPowerW float64
-		GridPowerW    float64
-		PVPowerW      float64
-		LoadPowerW    float64
+		SOC            float64
+		State          detector.State
+		BatteryPowerW  float64
+		GridPowerW     float64
+		PVPowerW       float64
+		LoadPowerW     float64
+		MainRelayState int
+		GridOutage     bool
 	}
 	statusMu sync.RWMutex
 )
@@ -46,16 +52,20 @@ func initLogging(logFilename string) error {
 		return fmt.Errorf("error opening log file: %v", err)
 	}
 
+	// Keep console output for interactive runs while retaining a persistent log
+	// for the tray application, which normally has no visible console.
 	mw := io.MultiWriter(os.Stdout, logfile)
-
-	log.SetOutput(mw)
-	log.SetFlags(
-		log.LstdFlags |
-			log.Lmicroseconds |
-			log.Lshortfile,
-	)
+	handler := slog.NewTextHandler(mw, &slog.HandlerOptions{AddSource: true})
+	slog.SetDefault(slog.New(handler))
 
 	return nil
+}
+
+func fatal(message string, args ...any) {
+	// slog deliberately has no Fatal method because logging and process control
+	// are separate concerns. Startup failures are the one place we combine them.
+	slog.Error(message, args...)
+	os.Exit(1)
 }
 
 func main() {
@@ -71,7 +81,7 @@ func main() {
 	go func() {
 		sig := <-sigs
 
-		log.Printf("received signal: %v", sig)
+		slog.Info("received signal", "signal", sig)
 
 		systray.Quit()
 	}()
@@ -79,60 +89,66 @@ func main() {
 	// Read .env file if it exists
 	err := godotenv.Load(configFile)
 	if err != nil {
-		log.Fatalf("error loading env file: %v", err)
+		fatal("error loading env file", "error", err)
 	}
 
 	// Load the configuration
 	cfg, err := config.Load(os.Args[1:])
 	if err != nil {
-		log.Fatalf("config error: %v", err)
+		fatal("config error", "error", err)
 	}
 
 	// Initialize logging to stdout and a file
 	err = initLogging(cfg.Logfile)
 	if err != nil {
-		log.Fatal(err)
+		fatal("initialize logging", "error", err)
 	}
 
 	// Initialize the emailer
 	emailer := notify.NewEmailer(cfg.SMTP)
 	if cfg.TestEmailAndExit {
 		if err := emailer.Send("DR Listener Test", "DR Listener SMTP configuration is working."); err != nil {
-			log.Fatalf("send test email: %v", err)
+			fatal("send test email", "error", err)
 		}
-		log.Printf("test email sent to %s", cfg.SMTP.To)
+		slog.Info("test email sent", "recipient", cfg.SMTP.To)
 		return
 	}
 
 	// Initialize the envoy client
-	client, err := gateway.NewClient(cfg.GatewayURL, cfg.GatewayToken, cfg.AllowInsecureTLS)
+	client, err := gateway.NewClient(cfg.GatewayURL, "", cfg.AllowInsecureTLS)
 	if err != nil {
-		log.Fatalf("gateway client: %v", err)
+		fatal("gateway client", "error", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Grab diagnostic info for reference only
-	info, err := client.Info(ctx)
-	if err != nil {
-		log.Printf("gateway /info failed: %v", err)
-	} else {
-		log.Printf("gateway info: %+v", info)
+	// Gateway bearer tokens expire. The client calls this provider once at
+	// startup and retries a request with a fresh token after one HTTP 401.
+	authenticator := gateway.NewCloudAuthenticator()
+	client.SetTokenProvider(func(ctx context.Context) (string, error) {
+		return authenticator.Token(ctx, cfg.EnphaseUsername, cfg.EnphasePassword, cfg.GatewaySerial)
+	})
+	if err := client.RefreshToken(ctx); err != nil {
+		fatal("authenticate with Enphase", "error", err)
 	}
+	slog.Info("gateway access token acquired", "serial", cfg.GatewaySerial)
 
 	snapshot, err := state.Load(cfg.StatePath)
 	if err != nil {
-		log.Fatalf("load state: %v", err)
+		fatal("load state", "error", err)
 	}
 	det := detector.New(detector.DefaultConfig(cfg.ReserveSOC), snapshot)
-	log.Printf("detector initialized: state=%s reserve_soc=%d poll_interval=%s", det.Snapshot().State, cfg.ReserveSOC, cfg.PollInterval)
+	// Require two matching relay readings to prevent a transient or unknown
+	// value from flashing an outage notification in the tray.
+	outageDet := outage.New(2)
+	slog.Info("detector initialized", "state", det.Snapshot().State, "reserve_soc", cfg.ReserveSOC, "poll_interval", cfg.PollInterval)
 
 	if slices.Contains(os.Args, "test_smtp") {
-		log.Print("Sending a test email")
-		err = testSMTP(ctx, client, det, emailer)
+		slog.Info("sending a test email")
+		err = testSMTP(ctx, client, det, emailer, cfg.Debug)
 		if err != nil {
-			log.Fatal(err)
+			fatal("test SMTP", "error", err)
 		}
 		return
 	}
@@ -140,8 +156,8 @@ func main() {
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
-	if err := pollOnce(ctx, client, det, emailer, cfg.StatePath); err != nil {
-		log.Printf("poll failed: %v", err)
+	if err := pollOnce(ctx, client, det, outageDet, emailer, cfg.StatePath, cfg.Debug); err != nil {
+		slog.Error("poll failed", "error", err)
 	}
 
 	go func() {
@@ -150,8 +166,8 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := pollOnce(ctx, client, det, emailer, cfg.StatePath); err != nil {
-					log.Printf("poll failed: %v", err)
+				if err := pollOnce(ctx, client, det, outageDet, emailer, cfg.StatePath, cfg.Debug); err != nil {
+					slog.Error("poll failed", "error", err)
 				}
 			}
 		}
@@ -165,8 +181,8 @@ func main() {
 
 }
 
-func testSMTP(ctx context.Context, client *gateway.Client, det *detector.Detector, emailer notify.Emailer) error {
-	raw, err := client.LiveData(ctx)
+func testSMTP(ctx context.Context, client *gateway.Client, det *detector.Detector, emailer notify.Emailer, debug bool) error {
+	raw, err := client.LiveData(ctx, debug)
 	if err != nil {
 		return err
 	}
@@ -176,14 +192,14 @@ func testSMTP(ctx context.Context, client *gateway.Client, det *detector.Detecto
 	}
 
 	result := det.Observe(sample)
-	log.Printf("sample state=%s soc=%.1f battery_w=%.0f grid_w=%.0f pv_w=%.0f load_w=%.0f reason=%q",
-		result.State,
-		sample.SOC,
-		sample.BatteryPowerW,
-		sample.GridPowerW,
-		sample.PVPowerW,
-		sample.LoadPowerW,
-		result.Reason,
+	slog.Info("sample",
+		"state", result.State,
+		"soc", sample.SOC,
+		"battery_w", sample.BatteryPowerW,
+		"grid_w", sample.GridPowerW,
+		"pv_w", sample.PVPowerW,
+		"load_w", sample.LoadPowerW,
+		"reason", result.Reason,
 	)
 
 	if err := emailer.Send("DR Event Started", testBody(result)); err != nil {
@@ -192,8 +208,48 @@ func testSMTP(ctx context.Context, client *gateway.Client, det *detector.Detecto
 	return nil
 }
 
-func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detector, emailer notify.Emailer, statePath string) error {
-	raw, err := client.LiveData(ctx)
+func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detector, outageDet *outage.Detector, emailer notify.Emailer, statePath string, debug bool) error {
+	// Debug mode captures the gateway's auxiliary endpoints for later analysis.
+	// These calls are diagnostic only: a failure must not prevent the primary
+	// live-data sample from driving detection and notifications.
+	if debug {
+		_, err := client.MeterDetails(ctx, debug)
+		if err != nil {
+			slog.Error("fetch meter details", "error", err)
+		}
+
+		_, err = client.MeterReadings(ctx, debug)
+		if err != nil {
+			slog.Error("fetch meter readings", "error", err)
+		}
+
+		_, err = client.ProductionMeterData(ctx, debug)
+		if err != nil {
+			slog.Error("fetch production meter data", "error", err)
+		}
+
+		_, err = client.EnergyData(ctx, debug)
+		if err != nil {
+			slog.Error("fetch energy data", "error", err)
+		}
+
+		_, err = client.InverterProductionData(ctx, debug)
+		if err != nil {
+			slog.Error("fetch inverter production data", "error", err)
+		}
+
+		_, err = client.PowerConsumptionData(ctx, debug)
+		if err != nil {
+			slog.Error("fetch power consumption data", "error", err)
+		}
+
+		_, err = client.GridReadings(ctx, debug)
+		if err != nil {
+			slog.Error("fetch inverter grid readings", "error", err)
+		}
+	}
+
+	raw, err := client.LiveData(ctx, debug)
 	if err != nil {
 		return err
 	}
@@ -203,41 +259,59 @@ func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detecto
 	}
 
 	result := det.Observe(sample)
-	log.Printf("sample state=%s soc=%.1f battery_w=%.0f grid_w=%.0f pv_w=%.0f load_w=%.0f reason=%q",
-		result.State,
-		sample.SOC,
-		sample.BatteryPowerW,
-		sample.GridPowerW,
-		sample.PVPowerW,
-		sample.LoadPowerW,
-		result.Reason,
+	gridOutage := outageDet.Observe(sample.MainRelayState)
+
+	slog.Info("sample",
+		"state", result.State,
+		"grid_outage", gridOutage,
+		"main_relay", sample.MainRelayState,
+		"soc", sample.SOC,
+		"battery_w", sample.BatteryPowerW,
+		"grid_w", sample.GridPowerW,
+		"pv_w", sample.PVPowerW,
+		"load_w", sample.LoadPowerW,
+		"task_id", sample.Tasks.TaskID,
+		"task_timestamp", sample.Tasks.Timestamp,
+		"reason", result.Reason,
 	)
 
+	// Persist before notifying. If the process exits during notification, the
+	// next run resumes the detector state instead of announcing a second start.
 	if err := state.Save(statePath, det.Snapshot()); err != nil {
 		return fmt.Errorf("save state: %w", err)
 	}
 
-	// Update the shared status so the systray icon knows
+	// Publish one coherent snapshot for the independently running tray updater.
 	statusMu.Lock()
+	previousGridOutage := Status.GridOutage
 	Status.SOC = sample.SOC
 	Status.State = result.State
 	Status.BatteryPowerW = result.Sample.BatteryPowerW
 	Status.GridPowerW = result.Sample.GridPowerW
 	Status.LoadPowerW = result.Sample.LoadPowerW
 	Status.PVPowerW = result.Sample.PVPowerW
+	Status.MainRelayState = sample.MainRelayState
+	Status.GridOutage = gridOutage
 	statusMu.Unlock()
+	if gridOutage != previousGridOutage {
+		if gridOutage {
+			slog.Warn("grid outage detected", "main_relay_state", sample.MainRelayState)
+		} else {
+			slog.Info("grid connection restored", "main_relay_state", sample.MainRelayState)
+		}
+	}
 
 	switch result.Transition {
 	case detector.Started:
 		if err := emailer.Send("DR Event Started", startedBody(result)); err != nil {
 			return fmt.Errorf("send start notification: %w", err)
 		}
-		log.Printf("DR event started: %s", result.Reason)
+		slog.Info("DR event started", "reason", result.Reason)
 	case detector.Ended:
 		if err := emailer.Send("DR Event Ended", endedBody(result)); err != nil {
 			return fmt.Errorf("send end notification: %w", err)
 		}
-		log.Printf("DR event ended: %s", result.Reason)
+		slog.Info("DR event ended", "reason", result.Reason)
 	}
 
 	return nil

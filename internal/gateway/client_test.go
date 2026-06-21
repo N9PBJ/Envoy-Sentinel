@@ -8,8 +8,10 @@ import (
 
 func TestNormalizeLiveData(t *testing.T) {
 	const rawJSON = `{
+		"tasks": {"task_id": 1, "timestamp": 2},
 		"meters": {
 			"last_update": 1710000000,
+			"main_relay_state": 2,
 			"soc": 72,
 			"enc_agg_soc": 73,
 			"pv": {"agg_p_mw": 6200000},
@@ -38,6 +40,9 @@ func TestNormalizeLiveData(t *testing.T) {
 	if got, want := sample.BatteryPowerW, 3100.0; got != want {
 		t.Fatalf("BatteryPowerW=%v want %v", got, want)
 	}
+	if got, want := sample.MainRelayState, 2; got != want {
+		t.Fatalf("MainRelayState=%v want %v", got, want)
+	}
 	if got, want := sample.GridPowerW, -900.0; got != want {
 		t.Fatalf("GridPowerW=%v want %v", got, want)
 	}
@@ -48,6 +53,10 @@ func TestNormalizeLiveData(t *testing.T) {
 
 func TestNormalizeFallsBackToSOC(t *testing.T) {
 	raw := RawLiveData{
+		"tasks": map[string]any{
+			"task_id":   float64(1),
+			"timestamp": float64(2),
+		},
 		"meters": map[string]any{
 			"soc": float64(66),
 		},

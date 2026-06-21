@@ -88,7 +88,7 @@ func TestDetectorStartsWhenBatteryExportsPastHouseLoad(t *testing.T) {
 	}
 }
 
-func TestDetectorEndsAtReserve(t *testing.T) {
+func TestDetectorRemainsActiveAtReserveUntilChargingResumes(t *testing.T) {
 	start := time.Date(2026, 6, 18, 15, 0, 0, 0, time.UTC)
 	d := New(DefaultConfig(20), Snapshot{})
 
@@ -101,12 +101,38 @@ func TestDetectorEndsAtReserve(t *testing.T) {
 	}
 
 	result := d.Observe(sample(start.Add(11*time.Minute), 21.0, 1200, -700, 5000, 2500))
-	if result.State != SuspectEnded {
-		t.Fatalf("state=%s want suspected_ended at reserve", result.State)
+	if result.State != Active {
+		t.Fatalf("state=%s want active at reserve", result.State)
 	}
-	result = d.Observe(sample(start.Add(27*time.Minute), 21.0, 100, 0, 5000, 2500))
+	// The battery is pinned at reserve while excess solar is exported. This is
+	// continuation evidence, not an event end.
+	result = d.Observe(sample(start.Add(27*time.Minute), 21.0, 0, -2500, 5000, 2500))
+	if result.State != Active || result.Transition != NoTransition {
+		t.Fatalf("state=%s transition=%q want active with no transition", result.State, result.Transition)
+	}
+	result = d.Observe(sample(start.Add(60*time.Minute), 21.0, -1200, -1300, 5000, 2500))
+	if result.State != Active {
+		t.Fatalf("state=%s want active before sustained-charge duration", result.State)
+	}
+	result = d.Observe(sample(start.Add(71*time.Minute), 22.0, -1200, -1300, 5000, 2500))
+	if result.State != SuspectEnded {
+		t.Fatalf("state=%s want suspected_ended after charging resumes", result.State)
+	}
+	result = d.Observe(sample(start.Add(87*time.Minute), 25.0, -1200, -1300, 5000, 2500))
 	if result.Transition != Ended {
 		t.Fatalf("transition=%q want ended", result.Transition)
+	}
+}
+
+func TestDetectorDoesNotEndAtReserveWithoutSolar(t *testing.T) {
+	start := time.Date(2026, 6, 18, 20, 0, 0, 0, time.UTC)
+	d := New(DefaultConfig(30), Snapshot{State: Active, EventStart: start, StartSOC: 80})
+
+	for _, elapsed := range []time.Duration{0, 10 * time.Minute, 30 * time.Minute, time.Hour} {
+		result := d.Observe(sample(start.Add(elapsed), 30, 0, 800, 0, 800))
+		if result.State != Active || result.Transition != NoTransition {
+			t.Fatalf("after %s state=%s transition=%q want active with no transition", elapsed, result.State, result.Transition)
+		}
 	}
 }
 

@@ -22,7 +22,9 @@ const defaultPollInterval = 30 * time.Second
 
 type Config struct {
 	GatewayURL       string
-	GatewayToken     string
+	GatewaySerial    string
+	EnphaseUsername  string
+	EnphasePassword  string
 	ReserveSOC       int
 	PollInterval     time.Duration
 	AllowInsecureTLS bool
@@ -30,6 +32,7 @@ type Config struct {
 	TestEmailAndExit bool
 	SMTP             SMTP
 	Logfile          string
+	Debug            bool
 }
 
 func Load(args []string) (Config, error) {
@@ -42,6 +45,7 @@ func Load(args []string) (Config, error) {
 	fs.BoolVar(&cfg.AllowInsecureTLS, "insecure-tls", envBool("ENPHASE_INSECURE_TLS", true), "allow the gateway self-signed TLS certificate")
 	fs.StringVar(&cfg.StatePath, "state-file", envString("DRLISTENER_STATE_FILE", "drlistener-state.json"), "state file path")
 	fs.BoolVar(&cfg.TestEmailAndExit, "test-email", false, "send one test email and exit")
+	fs.BoolVar(&cfg.Debug, "debug", false, "enable logging json responses from api")
 
 	fs.StringVar(&cfg.SMTP.Host, "smtp-host", envString("SMTP_HOST", ""), "SMTP server host")
 	fs.IntVar(&cfg.SMTP.Port, "smtp-port", envInt("SMTP_PORT", 587), "SMTP server port")
@@ -55,9 +59,11 @@ func Load(args []string) (Config, error) {
 		return Config{}, err
 	}
 
-	cfg.GatewayToken = os.Getenv("ENPHASE_GATEWAY_TOKEN")
-	if cfg.GatewayToken == "" {
-		return Config{}, errors.New("ENPHASE_GATEWAY_TOKEN is required")
+	cfg.EnphaseUsername = os.Getenv("ENPHASE_USERNAME")
+	cfg.EnphasePassword = os.Getenv("ENPHASE_PASSWORD")
+	cfg.GatewaySerial = os.Getenv("ENPHASE_GATEWAY_SERIAL")
+	if cfg.EnphaseUsername == "" || cfg.EnphasePassword == "" || cfg.GatewaySerial == "" {
+		return Config{}, errors.New("ENPHASE_USERNAME, ENPHASE_PASSWORD, and ENPHASE_GATEWAY_SERIAL are required")
 	}
 	if cfg.ReserveSOC < 0 || cfg.ReserveSOC > 100 {
 		return Config{}, errors.New("reserve SOC is required and must be between 0 and 100; set -reserve-soc or ENPHASE_RESERVE_SOC")

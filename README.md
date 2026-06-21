@@ -59,12 +59,12 @@ This avoids treating normal battery self-consumption, such as a large AC load, a
 
 ## Requirements
 
-- Go 1.26 or newer
+- Windows 10 or newer on an amd64 or arm64 machine
 - Machine running on the same LAN as the Enphase IQ Gateway
 - Enphase system-owner account
 - SMTP account for notifications
 
-The gateway commonly uses a self-signed TLS certificate. The app allows that by default.
+Go 1.26 or newer is required only when running from source. The gateway commonly uses a self-signed TLS certificate, which the app allows by default.
 
 ## Configuration
 
@@ -114,63 +114,59 @@ Command-line flags can also be used:
 -smtp-from       sender email address
 -smtp-to         recipient email address
 -log-file        combined text log, default envoy.log
--debug           save auxiliary gateway API responses under debug/
+-debug           enable debug logs and save raw API responses under debug/
 ```
 
-## Run
+## Run a Precompiled Release
 
-From PowerShell:
+Precompiled Windows releases are available on the [GitHub Releases page](https://github.com/N9PBJ/Envoy-Sentinel/releases). Choose the ZIP matching your machine:
+
+- `windows_amd64` for most Intel and AMD Windows computers
+- `windows_arm64` for Windows on ARM
+
+Download and extract the archive, then place your `.env` file beside `drlistener.exe` or set the configuration in the process environment. From PowerShell:
 
 ```powershell
-go run . -gateway-url https://envoy.local
+Expand-Archive .\drlistener_VERSION_windows_amd64.zip -DestinationPath .\drlistener
+Set-Location .\drlistener
+.\drlistener.exe
+```
+
+The release archive contains only `drlistener.exe`. Tray icons are embedded in the executable. The state file, log, and optional `debug/` directory are created at runtime; credentials and `.env` are deliberately never included in a release.
+
+Published releases also include `checksums.txt`, which can be used to verify the downloaded archive:
+
+```powershell
+Get-FileHash .\drlistener_VERSION_windows_amd64.zip -Algorithm SHA256
+```
+
+Compare the resulting hash with the corresponding entry in `checksums.txt`.
+
+## Run from Source
+
+Install Go 1.26 or newer, clone the repository, and run it from PowerShell:
+
+
+```powershell
+git clone https://github.com/N9PBJ/Envoy-Sentinel.git
+Set-Location .\Envoy-Sentinel
+go run .
 ```
 
 If `go` is not on PATH but installed in the default Windows location:
 
 ```powershell
-& 'C:\Program Files\Go\bin\go.exe' run . -gateway-url https://envoy.local
+& 'C:\Program Files\Go\bin\go.exe' run .
 ```
 
 To test SMTP, open the tray menu and click **Send Test Email...**. Click the confirmation item within 10 seconds to send; otherwise it cancels automatically. Delivery happens in the background so the tray and gateway polling remain responsive.
 
-To build:
+To build the executable yourself:
 
 ```powershell
 go build -o drlistener.exe .
-```
-
-Then run:
-
-```powershell
 .\drlistener.exe -gateway-url https://envoy.local
 ```
-
-## Linux Service Notes
-
-Build on the target machine:
-
-```bash
-go build -o drlistener .
-```
-
-Run with environment variables:
-
-```bash
-export ENPHASE_USERNAME='owner@example.com'
-export ENPHASE_PASSWORD='your-enphase-password'
-export ENPHASE_GATEWAY_SERIAL='your-gateway-serial-number'
-export ENPHASE_RESERVE_SOC='20'
-export SMTP_HOST='smtp.example.com'
-export SMTP_PORT='587'
-export SMTP_USER='smtp-user'
-export SMTP_PASS='smtp-password'
-export SMTP_FROM='drlistener@example.com'
-export SMTP_TO='you@example.com'
-
-./drlistener -gateway-url https://envoy.local
-```
-
-For a long-running Linux install, put the environment variables in a protected environment file and run the binary under systemd.
 
 ## State File
 

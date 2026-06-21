@@ -16,7 +16,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w
+      - -s -w -H=windowsgui
     mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
@@ -27,8 +27,9 @@ archives:
       - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
-      - LICENSE
-      - README.md
+      # GoReleaser otherwise adds common documentation files by default. The
+      # executable already embeds its icons, so it is the only runtime file.
+      - none*
 
 checksum:
   name_template: checksums.txt

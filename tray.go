@@ -162,8 +162,8 @@ func trayUpdater() {
 
 func onReady(cancel context.CancelFunc, emailer emailSender) {
 	systray.SetIcon(battery100)
-	systray.SetTitle("DR Event Notifier")
-	systray.SetTooltip("Envoy / GVEC DR Event Watcher")
+	systray.SetTitle("Envoy Sentinel")
+	systray.SetTooltip("Enphase DR Event Watcher")
 
 	mDREvent = systray.AddMenuItem("DR Event: --", "")
 	mDREvent.Disable()
@@ -226,8 +226,8 @@ func onReady(cancel context.CancelFunc, emailer emailSender) {
 				mTestEmail.Disable()
 				go func() {
 					testEmailResult <- emailer.Send(
-						"DR Listener Test",
-						fmt.Sprintf("DR Listener SMTP configuration is working.\n\nSent: %s\n", time.Now().Format(time.RFC1123)),
+						"Envoy Sentinel Test",
+						fmt.Sprintf("Envoy Sentinel SMTP configuration is working.\n\nSent: %s\n", time.Now().Format(time.RFC1123)),
 					)
 				}()
 			case <-confirmationExpired:

@@ -1,6 +1,6 @@
-# Enphase DR Listener
+# Envoy Sentinel
 
-Enphase DR Listener is a small Go service that watches an Enphase IQ Gateway on the local network and can send an email when it infers that a demand response event has started or ended.
+Envoy Sentinel is a small Go application that watches an Enphase IQ Gateway on the local network and can send an email when it infers that a demand response event has started or ended.
 
 The app polls the IQ Gateway local API over HTTPS. At startup it uses the system owner's Enphase credentials and the configured gateway serial number to obtain the required bearer token automatically.
 
@@ -87,7 +87,7 @@ $env:SMTP_HOST = 'smtp.example.com'
 $env:SMTP_PORT = '587'
 $env:SMTP_USER = 'smtp-user'
 $env:SMTP_PASS = 'smtp-password'
-$env:SMTP_FROM = 'drlistener@example.com'
+$env:SMTP_FROM = 'envoy-sentinel@example.com'
 $env:SMTP_TO = 'you@example.com'
 ```
 
@@ -129,20 +129,20 @@ Precompiled Windows releases are available on the [GitHub Releases page](https:/
 - `windows_amd64` for most Intel and AMD Windows computers
 - `windows_arm64` for Windows on ARM
 
-Download and extract the archive, then place your `.env` file beside `drlistener.exe` or set the configuration in the process environment. From PowerShell:
+Download and extract the archive, then place your `.env` file beside `envoy-sentinel.exe` or set the configuration in the process environment. From PowerShell:
 
 ```powershell
-Expand-Archive .\drlistener_VERSION_windows_amd64.zip -DestinationPath .\drlistener
-Set-Location .\drlistener
-.\drlistener.exe
+Expand-Archive .\envoy-sentinel_VERSION_windows_amd64.zip -DestinationPath .\envoy-sentinel
+Set-Location .\envoy-sentinel
+.\envoy-sentinel.exe
 ```
 
-The release archive contains only `drlistener.exe`. Tray icons are embedded in the executable. The state file, log, and optional `debug/` directory are created at runtime; credentials and `.env` are deliberately never included in a release.
+The release archive contains only `envoy-sentinel.exe`. Tray icons are embedded in the executable. The state file, log, and optional `debug/` directory are created at runtime; credentials and `.env` are deliberately never included in a release.
 
 Published releases also include `checksums.txt`, which can be used to verify the downloaded archive:
 
 ```powershell
-Get-FileHash .\drlistener_VERSION_windows_amd64.zip -Algorithm SHA256
+Get-FileHash .\envoy-sentinel_VERSION_windows_amd64.zip -Algorithm SHA256
 ```
 
 Compare the resulting hash with the corresponding entry in `checksums.txt`.
@@ -169,8 +169,8 @@ When SMTP notifications are enabled, test them from the tray menu by clicking **
 To build the executable yourself:
 
 ```powershell
-go build -o drlistener.exe .
-.\drlistener.exe -gateway-url https://envoy.local
+go build -ldflags "-H=windowsgui" -o envoy-sentinel.exe .
+.\envoy-sentinel.exe -gateway-url https://envoy.local
 ```
 
 ## State File
@@ -200,7 +200,7 @@ go test ./...
 If Go's default build cache is not writable in the current shell, use a local cache:
 
 ```powershell
-$env:GOCACHE = 'D:\DRListener\.gocache'
+$env:GOCACHE = Join-Path $PWD '.gocache'
 go test ./...
 ```
 

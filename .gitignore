@@ -6,3 +6,4 @@ icogenerator/
 .env
 debug/
 local-gateway.pdf
+dist/

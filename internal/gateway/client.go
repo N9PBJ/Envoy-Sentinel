@@ -384,19 +384,13 @@ func (c *Client) getXML(ctx context.Context, path string, authorized bool, dst *
 }
 
 func writeDebugFile(path string, body []byte, fType string) error {
+	if err := os.MkdirAll("debug", 0o755); err != nil {
+		return fmt.Errorf("create debug directory: %w", err)
+	}
 	debugPath := strings.ReplaceAll(path, "/", "_")
 	filePath := fmt.Sprintf("./debug/%s-%s.%s", time.Now().UTC().Format("2006-01-02T15-04-05Z"), debugPath, fType)
-	f, err := os.Create(filePath)
-	if err == nil {
-		_, err = f.Write(body)
-		if err != nil {
-			slog.Error("write debug file", "type", fType, "error", err)
-		}
-		defer func() {
-			_ = f.Close()
-		}()
-	} else {
-		slog.Error("open debug file", "type", fType, "error", err)
+	if err := os.WriteFile(filePath, body, 0o600); err != nil {
+		return fmt.Errorf("write %s debug file: %w", fType, err)
 	}
 	return nil
 }

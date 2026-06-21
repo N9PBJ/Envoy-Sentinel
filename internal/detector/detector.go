@@ -48,6 +48,7 @@ type Detector struct {
 	lastSample           gateway.Sample
 	hasLastSample        bool
 	estimatedDischargeWh float64
+	pending              *Result
 }
 
 type Transition string
@@ -71,9 +72,15 @@ type Result struct {
 }
 
 type Snapshot struct {
-	State      State     `json:"state"`
-	EventStart time.Time `json:"event_start,omitempty"`
-	StartSOC   float64   `json:"start_soc,omitempty"`
+	State                State     `json:"state"`
+	EventStart           time.Time `json:"event_start,omitempty"`
+	StartSOC             float64   `json:"start_soc,omitempty"`
+	SuspectActiveAt      time.Time `json:"suspect_active_at,omitempty"`
+	SuspectActiveSOC     float64   `json:"suspect_active_soc,omitempty"`
+	SuspectEndedAt       time.Time `json:"suspect_ended_at,omitempty"`
+	LowDischargeSince    time.Time `json:"low_discharge_since,omitempty"`
+	EstimatedDischargeWh float64   `json:"estimated_discharge_wh,omitempty"`
+	Pending              *Result   `json:"pending_notification,omitempty"`
 }
 
 func DefaultConfig(reserveSOC int) Config {
@@ -97,11 +104,31 @@ func DefaultConfig(reserveSOC int) Config {
 
 func New(cfg Config, snapshot Snapshot) *Detector {
 	state := snapshot.State
-	if state == "" {
+	switch state {
+	case Inactive, SuspectActive, Active, SuspectEnded:
+	default:
 		state = Inactive
 	}
-	d := &Detector{cfg: cfg, state: state}
-	if state == Active && !snapshot.EventStart.IsZero() {
+	// Snapshots written by older versions did not contain provisional-state
+	// timestamps. Fall back safely instead of treating a zero timestamp as an
+	// immediately confirmed transition.
+	if state == SuspectActive && snapshot.SuspectActiveAt.IsZero() {
+		state = Inactive
+	}
+	if state == SuspectEnded && snapshot.SuspectEndedAt.IsZero() {
+		state = Active
+	}
+	d := &Detector{
+		cfg:                  cfg,
+		state:                state,
+		suspectActiveAt:      snapshot.SuspectActiveAt,
+		suspectActiveSOC:     snapshot.SuspectActiveSOC,
+		suspectEndedAt:       snapshot.SuspectEndedAt,
+		lowDischargeSince:    snapshot.LowDischargeSince,
+		estimatedDischargeWh: snapshot.EstimatedDischargeWh,
+		pending:              snapshot.Pending,
+	}
+	if (state == Active || state == SuspectEnded) && !snapshot.EventStart.IsZero() {
 		d.activeEventStart = snapshot.EventStart
 		d.activeEventStartSOC = snapshot.StartSOC
 	}
@@ -109,7 +136,15 @@ func New(cfg Config, snapshot Snapshot) *Detector {
 }
 
 func (d *Detector) Snapshot() Snapshot {
-	s := Snapshot{State: d.state}
+	s := Snapshot{
+		State:                d.state,
+		SuspectActiveAt:      d.suspectActiveAt,
+		SuspectActiveSOC:     d.suspectActiveSOC,
+		SuspectEndedAt:       d.suspectEndedAt,
+		LowDischargeSince:    d.lowDischargeSince,
+		EstimatedDischargeWh: d.estimatedDischargeWh,
+		Pending:              d.pending,
+	}
 	if d.state == Active || d.state == SuspectEnded {
 		s.EventStart = d.activeEventStart
 		s.StartSOC = d.activeEventStartSOC
@@ -117,11 +152,24 @@ func (d *Detector) Snapshot() Snapshot {
 	return s
 }
 
+// AcknowledgeTransition clears a pending transition after its notification is
+// delivered. Until acknowledged, Observe returns the same transition and
+// pauses state-machine transitions so a temporary SMTP failure cannot lose or
+// reorder notifications.
+func (d *Detector) AcknowledgeTransition(transition Transition) {
+	if d.pending != nil && d.pending.Transition == transition {
+		d.pending = nil
+	}
+}
+
 func (d *Detector) Observe(sample gateway.Sample) Result {
 	d.addDischargeEnergy(sample)
 	d.lastSample = sample
 	d.hasLastSample = true
 	d.addHistory(sample)
+	if d.pending != nil {
+		return *d.pending
+	}
 
 	result := Result{State: d.state, Sample: sample}
 	if d.isEventLikeDischarge(sample) {
@@ -152,7 +200,7 @@ func (d *Detector) Observe(sample gateway.Sample) Result {
 			d.state = Active
 			d.activeEventStart = d.suspectActiveAt
 			d.activeEventStartSOC = d.suspectActiveSOC
-			d.estimatedDischargeWh = 0
+			d.estimatedDischargeWh = d.recentDischargeEnergy(d.activeEventStart, sample.At)
 			result.State = d.state
 			result.Transition = Started
 			result.EventStart = d.activeEventStart
@@ -199,6 +247,10 @@ func (d *Detector) Observe(sample gateway.Sample) Result {
 
 	if result.State == "" {
 		result.State = d.state
+	}
+	if result.Transition != NoTransition {
+		pending := result
+		d.pending = &pending
 	}
 	return result
 }
@@ -308,4 +360,23 @@ func (d *Detector) addDischargeEnergy(sample gateway.Sample) {
 		return
 	}
 	d.estimatedDischargeWh += sample.BatteryPowerW * hours
+}
+
+// recentDischargeEnergy accounts for the confirmation window that precedes a
+// Started transition. Without it, an event backdated to suspectActiveAt would
+// report no energy for its first several minutes.
+func (d *Detector) recentDischargeEnergy(start, end time.Time) float64 {
+	var wattHours float64
+	for i := 1; i < len(d.history); i++ {
+		previous := d.history[i-1]
+		current := d.history[i]
+		if current.At.Before(start) || current.At.After(end) || current.BatteryPowerW <= 0 {
+			continue
+		}
+		hours := current.At.Sub(previous.At).Hours()
+		if hours > 0 && hours <= 1 {
+			wattHours += current.BatteryPowerW * hours
+		}
+	}
+	return wattHours
 }

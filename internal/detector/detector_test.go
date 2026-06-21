@@ -25,6 +25,7 @@ func TestDetectorStartsAndEndsEvent(t *testing.T) {
 	if result.Transition != Started {
 		t.Fatalf("transition=%q want %q, state=%s reason=%s", result.Transition, Started, result.State, result.Reason)
 	}
+	d.AcknowledgeTransition(Started)
 
 	result = d.Observe(sample(start.Add(11*time.Minute), 76, 200, 0, 5000, 2500))
 	if result.State != Active {
@@ -99,6 +100,7 @@ func TestDetectorRemainsActiveAtReserveUntilChargingResumes(t *testing.T) {
 	if started.Transition != Started {
 		t.Fatalf("transition=%q want started", started.Transition)
 	}
+	d.AcknowledgeTransition(Started)
 
 	result := d.Observe(sample(start.Add(11*time.Minute), 21.0, 1200, -700, 5000, 2500))
 	if result.State != Active {
@@ -133,6 +135,63 @@ func TestDetectorDoesNotEndAtReserveWithoutSolar(t *testing.T) {
 		if result.State != Active || result.Transition != NoTransition {
 			t.Fatalf("after %s state=%s transition=%q want active with no transition", elapsed, result.State, result.Transition)
 		}
+	}
+}
+
+func TestPendingTransitionSurvivesRestartUntilAcknowledged(t *testing.T) {
+	start := time.Date(2026, 6, 18, 15, 0, 0, 0, time.UTC)
+	d := New(DefaultConfig(20), Snapshot{})
+
+	d.Observe(sample(start, 80, 1200, -700, 5000, 2500))
+	d.Observe(sample(start.Add(time.Minute), 79.5, 1200, -700, 5000, 2500))
+	d.Observe(sample(start.Add(2*time.Minute), 79, 1200, -700, 5000, 2500))
+	started := d.Observe(sample(start.Add(10*time.Minute), 77, 1200, -700, 5000, 2500))
+	if started.Transition != Started {
+		t.Fatalf("transition=%q want started", started.Transition)
+	}
+
+	restored := New(DefaultConfig(20), d.Snapshot())
+	retried := restored.Observe(sample(start.Add(11*time.Minute), 76.5, 1200, -700, 5000, 2500))
+	if retried.Transition != Started || retried.EventStart != started.EventStart {
+		t.Fatalf("retried transition=%q start=%s want started at %s", retried.Transition, retried.EventStart, started.EventStart)
+	}
+	restored.AcknowledgeTransition(Started)
+	if restored.Snapshot().Pending != nil {
+		t.Fatal("pending transition remains after acknowledgement")
+	}
+}
+
+func TestSuspectedEndConfirmationSurvivesRestart(t *testing.T) {
+	start := time.Date(2026, 6, 18, 15, 0, 0, 0, time.UTC)
+	suspectedAt := start.Add(30 * time.Minute)
+	restored := New(DefaultConfig(20), Snapshot{
+		State:             SuspectEnded,
+		EventStart:        start,
+		StartSOC:          80,
+		SuspectEndedAt:    suspectedAt,
+		LowDischargeSince: start.Add(20 * time.Minute),
+	})
+
+	result := restored.Observe(sample(suspectedAt.Add(5*time.Minute), 70, 100, 0, 0, 1000))
+	if result.State != SuspectEnded || result.Transition != NoTransition {
+		t.Fatalf("state=%s transition=%q want suspected_ended without transition", result.State, result.Transition)
+	}
+	result = restored.Observe(sample(suspectedAt.Add(16*time.Minute), 70, 100, 0, 0, 1000))
+	if result.Transition != Ended || result.EventStart != start {
+		t.Fatalf("transition=%q event_start=%s want ended from %s", result.Transition, result.EventStart, start)
+	}
+}
+
+func TestLegacySuspectedEndSnapshotFallsBackToActive(t *testing.T) {
+	start := time.Date(2026, 6, 18, 15, 0, 0, 0, time.UTC)
+	restored := New(DefaultConfig(20), Snapshot{
+		State:      SuspectEnded,
+		EventStart: start,
+		StartSOC:   80,
+	})
+
+	if got := restored.Snapshot().State; got != Active {
+		t.Fatalf("state=%s want active", got)
 	}
 }
 

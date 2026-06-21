@@ -25,19 +25,38 @@ func Load(path string) (detector.Snapshot, error) {
 }
 
 func Save(path string, snapshot detector.Snapshot) error {
-	if err := os.MkdirAll(filepath.Dir(pathOrDot(path)), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
-}
 
-func pathOrDot(path string) string {
-	if filepath.Dir(path) == "." {
-		return "."
+	// Write and flush a sibling temporary file before replacing the state file.
+	// A crash can leave the old or new snapshot, but not a half-written one.
+	temp, err := os.CreateTemp(dir, ".drlistener-state-*")
+	if err != nil {
+		return err
 	}
-	return path
+	tempPath := temp.Name()
+	defer func() { _ = os.Remove(tempPath) }()
+
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
 }

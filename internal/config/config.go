@@ -29,7 +29,6 @@ type Config struct {
 	PollInterval     time.Duration
 	AllowInsecureTLS bool
 	StatePath        string
-	TestEmailAndExit bool
 	SMTP             SMTP
 	Logfile          string
 	Debug            bool
@@ -44,8 +43,7 @@ func Load(args []string) (Config, error) {
 	fs.DurationVar(&cfg.PollInterval, "poll-interval", envDuration("DRLISTENER_POLL_INTERVAL", defaultPollInterval), "poll interval")
 	fs.BoolVar(&cfg.AllowInsecureTLS, "insecure-tls", envBool("ENPHASE_INSECURE_TLS", true), "allow the gateway self-signed TLS certificate")
 	fs.StringVar(&cfg.StatePath, "state-file", envString("DRLISTENER_STATE_FILE", "drlistener-state.json"), "state file path")
-	fs.BoolVar(&cfg.TestEmailAndExit, "test-email", false, "send one test email and exit")
-	fs.BoolVar(&cfg.Debug, "debug", false, "enable logging json responses from api")
+	fs.BoolVar(&cfg.Debug, "debug", false, "enable debug logs and save raw API responses")
 
 	fs.StringVar(&cfg.SMTP.Host, "smtp-host", envString("SMTP_HOST", ""), "SMTP server host")
 	fs.IntVar(&cfg.SMTP.Port, "smtp-port", envInt("SMTP_PORT", 587), "SMTP server port")

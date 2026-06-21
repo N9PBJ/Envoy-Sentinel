@@ -32,10 +32,12 @@ On startup, `main.go` loads configuration, obtains an Enphase bearer token, rest
 
 1. Fetch and normalize `/ivp/livedata/status` into a gateway sample.
 2. Pass the sample through the DR-event and grid-outage detectors.
-3. Persist the DR detector snapshot before sending transition notifications.
+3. Persist the DR detector snapshot and any pending transition notification.
 4. Publish a locked status snapshot for the independently running tray updater.
 
 The gateway client refreshes its bearer token and retries once after an HTTP 401. The token and account credentials remain in memory and are never intentionally logged or persisted.
+
+Transition notifications use a small persistent outbox: a start or end transition remains pending until SMTP delivery succeeds. This favors eventual delivery over strict deduplication; a crash after SMTP accepts a message but before its acknowledgement is saved can produce a duplicate rather than silently losing the event.
 
 ## Detection Heuristic
 
@@ -78,6 +80,8 @@ $env:SMTP_FROM = 'drlistener@example.com'
 $env:SMTP_TO = 'you@example.com'
 ```
 
+These values may be set directly in the process environment or placed in an optional `.env` file beside the executable.
+
 Usually required for authenticated SMTP:
 
 ```powershell
@@ -103,7 +107,6 @@ Command-line flags can also be used:
 -poll-interval   poll interval, default 30s
 -insecure-tls    allow self-signed gateway TLS certificate, default true
 -state-file      persistent detector state file, default drlistener-state.json
--test-email      send one SMTP test email and exit
 -smtp-host       SMTP host
 -smtp-port       SMTP port, default 587
 -smtp-user       SMTP username
@@ -128,11 +131,7 @@ If `go` is not on PATH but installed in the default Windows location:
 & 'C:\Program Files\Go\bin\go.exe' run . -gateway-url https://envoy.local
 ```
 
-To send a test email and exit:
-
-```powershell
-go run . -test-email
-```
+To test SMTP, open the tray menu and click **Send Test Email...**. Click the confirmation item within 10 seconds to send; otherwise it cancels automatically. Delivery happens in the background so the tray and gateway polling remain responsive.
 
 To build:
 
@@ -181,11 +180,11 @@ The app writes a small JSON state file, default:
 drlistener-state.json
 ```
 
-This prevents duplicate start/end notifications if the process restarts during an inferred event. Keep this file writable by the service user and avoid committing it.
+This restores active and provisional detector timing after a restart and retains undelivered notifications for retry. Keep this file writable by the service user and avoid committing it. Updates use a flushed temporary file followed by an atomic replacement so an interrupted write does not leave partial JSON.
 
 ## Logging and Diagnostics
 
-The app uses Go's structured `slog` logger. Normal operation and state transitions are `INFO`, a confirmed grid outage is `WARN`, and failed operations are `ERROR`. Logs go to both standard output and the file selected by `-log-file`/`LOGFILE`; source locations are included.
+The app uses Go's structured `slog` logger. Normal operation and state transitions are `INFO`, a confirmed grid outage is `WARN`, and failed operations are `ERROR`. Logs go to both standard output and the file selected by `-log-file`/`LOGFILE`; source locations are included. Passing `-debug` also enables `DEBUG` records, including per-poll telemetry samples.
 
 Debug mode calls several auxiliary gateway endpoints and saves their raw responses under `debug/` for offline investigation. Those calls are best-effort and do not stop normal live-data polling if one fails. Debug files may contain system telemetry, so review them before sharing.
 

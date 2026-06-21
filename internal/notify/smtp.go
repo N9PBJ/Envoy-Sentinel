@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/smtp"
 	"strings"
+	"time"
 
 	"drlistener/internal/config"
 )
@@ -13,6 +14,8 @@ import (
 type Emailer struct {
 	cfg config.SMTP
 }
+
+const smtpTimeout = 30 * time.Second
 
 func NewEmailer(cfg config.SMTP) Emailer {
 	return Emailer{cfg: cfg}
@@ -39,15 +42,14 @@ func (e Emailer) Send(subject, body string) error {
 	message.WriteString(body)
 	message.WriteString("\r\n")
 
-	if e.cfg.Username == "" {
-		return smtp.SendMail(addr, nil, e.cfg.From, []string{e.cfg.To}, []byte(message.String()))
-	}
-
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return err
 	}
-	auth := smtp.PlainAuth("", e.cfg.Username, e.cfg.Password, host)
+	var auth smtp.Auth
+	if e.cfg.Username != "" {
+		auth = smtp.PlainAuth("", e.cfg.Username, e.cfg.Password, host)
+	}
 	if e.cfg.Port == 465 {
 		return e.sendSMTPS(addr, host, auth, []byte(message.String()))
 	}
@@ -55,33 +57,14 @@ func (e Emailer) Send(subject, body string) error {
 }
 
 func (e Emailer) sendSMTP(addr, host string, auth smtp.Auth, msg []byte) error {
-	client, err := smtp.Dial(addr)
+	conn, err := net.DialTimeout("tcp", addr, smtpTimeout)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = client.Close()
-	}()
-
-	if ok, _ := client.Extension("STARTTLS"); ok {
-		if err := client.StartTLS(&tls.Config{ServerName: host}); err != nil {
-			return err
-		}
-	}
-	if err := client.Auth(auth); err != nil {
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetDeadline(time.Now().Add(smtpTimeout)); err != nil {
 		return err
 	}
-	return e.sendWithClient(client, msg)
-}
-
-func (e Emailer) sendSMTPS(addr, host string, auth smtp.Auth, msg []byte) error {
-	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: host})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = conn.Close()
-	}()
 
 	client, err := smtp.NewClient(conn, host)
 	if err != nil {
@@ -91,10 +74,53 @@ func (e Emailer) sendSMTPS(addr, host string, auth smtp.Auth, msg []byte) error 
 		_ = client.Close()
 	}()
 
-	if err := client.Auth(auth); err != nil {
-		return err
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(tlsConfig(host)); err != nil {
+			return err
+		}
+	}
+	if auth != nil {
+		if err := client.Auth(auth); err != nil {
+			return err
+		}
 	}
 	return e.sendWithClient(client, msg)
+}
+
+func (e Emailer) sendSMTPS(addr, host string, auth smtp.Auth, msg []byte) error {
+	dialer := &net.Dialer{Timeout: smtpTimeout}
+	conn, err := tls.DialWithDialer(dialer, "tcp", addr, tlsConfig(host))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+	if err := conn.SetDeadline(time.Now().Add(smtpTimeout)); err != nil {
+		return err
+	}
+
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = client.Close()
+	}()
+
+	if auth != nil {
+		if err := client.Auth(auth); err != nil {
+			return err
+		}
+	}
+	return e.sendWithClient(client, msg)
+}
+
+func tlsConfig(host string) *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: host,
+	}
 }
 
 func (e Emailer) sendWithClient(client *smtp.Client, msg []byte) error {

@@ -2,9 +2,34 @@ package gateway
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestWriteDebugFileCreatesDirectory(t *testing.T) {
+	t.Chdir(t.TempDir())
+	want := []byte(`{"status":"ok"}`)
+	if err := writeDebugFile("/ivp/livedata/status", want, "json"); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, err := filepath.Glob(filepath.Join("debug", "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("debug files=%d want 1", len(matches))
+	}
+	got, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("debug body=%q want %q", got, want)
+	}
+}
 
 func TestNormalizeLiveData(t *testing.T) {
 	const rawJSON = `{

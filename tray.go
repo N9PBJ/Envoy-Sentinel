@@ -160,7 +160,7 @@ func trayUpdater() {
 	}
 }
 
-func onReady(cancel context.CancelFunc) {
+func onReady(cancel context.CancelFunc, emailer emailSender) {
 	systray.SetIcon(battery100)
 	systray.SetTitle("DR Event Notifier")
 	systray.SetTooltip("Envoy / GVEC DR Event Watcher")
@@ -185,17 +185,57 @@ func onReady(cancel context.CancelFunc) {
 
 	systray.AddSeparator()
 	mConfig := systray.AddMenuItem("Open Config", "")
+	mTestEmail := systray.AddMenuItem("Send Test Email...", "Click twice to confirm")
 
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "")
 
 	go func() {
+		const confirmationWindow = 10 * time.Second
+		var confirmationTimer *time.Timer
+		var confirmationExpired <-chan time.Time
+		testEmailResult := make(chan error, 1)
+
 		for {
 			select {
 			case <-mQuit.ClickedCh:
+				if confirmationTimer != nil {
+					confirmationTimer.Stop()
+				}
 				cancel()
 				systray.Quit()
 				return
+			case <-mTestEmail.ClickedCh:
+				if confirmationExpired == nil {
+					mTestEmail.SetTitle("Confirm Send Test Email")
+					confirmationTimer = time.NewTimer(confirmationWindow)
+					confirmationExpired = confirmationTimer.C
+					continue
+				}
+
+				confirmationTimer.Stop()
+				confirmationExpired = nil
+				mTestEmail.SetTitle("Sending Test Email...")
+				mTestEmail.Disable()
+				go func() {
+					testEmailResult <- emailer.Send(
+						"DR Listener Test",
+						fmt.Sprintf("DR Listener SMTP configuration is working.\n\nSent: %s\n", time.Now().Format(time.RFC1123)),
+					)
+				}()
+			case <-confirmationExpired:
+				confirmationExpired = nil
+				confirmationTimer = nil
+				mTestEmail.SetTitle("Send Test Email...")
+			case err := <-testEmailResult:
+				mTestEmail.Enable()
+				if err != nil {
+					mTestEmail.SetTitle("Test Email Failed - Click to Retry")
+					slog.Error("send test email", "error", err)
+				} else {
+					mTestEmail.SetTitle("Test Email Sent - Click to Send Again")
+					slog.Info("test email sent")
+				}
 			case <-mConfig.ClickedCh:
 				err := exec.Command(
 					"notepad.exe",

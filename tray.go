@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"drlistener/internal/detector"
+	"drlistener/internal/outage"
 	_ "embed"
 	"fmt"
 	"log/slog"
@@ -70,9 +71,12 @@ func batteryStatus(w float64) string {
 	}
 }
 
-func gridStatus(outage bool, mainRelayState int, powerW float64) string {
-	if outage {
-		return "Grid: OUTAGE — Islanded"
+func gridStatus(gridState outage.State, mainRelayState int, powerW float64) string {
+	switch gridState {
+	case outage.StateGridDown:
+		return "Grid: OUTAGE - Islanded"
+	case outage.StateManualDisconnected:
+		return "Grid: Manually Disconnected"
 	}
 	if mainRelayState == 3 {
 		return "Grid: Reconnecting"
@@ -80,9 +84,12 @@ func gridStatus(outage bool, mainRelayState int, powerW float64) string {
 	return fmt.Sprintf("Grid: %.1f kW", powerW/1000)
 }
 
-func gridTooltip(outage bool, powerW float64) string {
-	if outage {
+func gridTooltip(gridState outage.State, powerW float64) string {
+	if gridState == outage.StateGridDown {
 		return "OUTAGE"
+	}
+	if gridState == outage.StateManualDisconnected {
+		return "MANUAL DISCONNECT"
 	}
 	return fmt.Sprintf("%.1fkW", powerW/1000)
 }
@@ -139,7 +146,7 @@ func trayUpdater() {
 
 		mBattery.SetTitle(batteryStatus(s.BatteryPowerW))
 
-		mGrid.SetTitle(gridStatus(s.GridOutage, s.MainRelayState, s.GridPowerW))
+		mGrid.SetTitle(gridStatus(s.GridState, s.MainRelayState, s.GridPowerW))
 
 		mSolar.SetTitle(
 			fmt.Sprintf("Solar: %.1f kW", s.PVPowerW/1000),
@@ -153,7 +160,7 @@ func trayUpdater() {
 			fmt.Sprintf(
 				"SOC %.0f%% | Grid %s | DR Event %s",
 				s.SOC,
-				gridTooltip(s.GridOutage, s.GridPowerW),
+				gridTooltip(s.GridState, s.GridPowerW),
 				s.State,
 			),
 		)

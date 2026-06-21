@@ -1,48 +1,72 @@
 package outage
 
+type State string
+
 const (
-	// Relay values come from meters.main_relay_state in the IQ Gateway live-data
-	// response. Unknown values are intentionally handled like RelayTransition.
-	RelayConnected  = 1
-	RelayIslanded   = 2
-	RelayTransition = 3
+	StateUnknown            State = "unknown"
+	StateConnected          State = "connected"
+	StateGridDown           State = "grid_down"
+	StateManualDisconnected State = "manual_disconnected"
+
+	RelayGridDown           = 0
+	RelayConnected          = 1
+	RelayManualDisconnected = 2
+	RelayTransition         = 3
 )
 
 type Detector struct {
-	confirmPolls   int
-	islandedPolls  int
-	connectedPolls int
-	islanded       bool
+	confirmPolls int
+	candidate    State
+	candidateN   int
+	state        State
 }
 
 // New returns a relay-state debouncer. confirmPolls is the number of
-// consecutive connected or islanded readings required to change state.
+// consecutive readings required to confirm a stable state change.
 func New(confirmPolls int) *Detector {
 	if confirmPolls < 1 {
 		confirmPolls = 1
 	}
-	return &Detector{confirmPolls: confirmPolls}
+	return &Detector{confirmPolls: confirmPolls, state: StateUnknown}
 }
 
 // Observe requires consecutive stable relay readings. Transitional or unknown
-// values preserve the last confirmed state but reset confirmation counters.
-func (d *Detector) Observe(mainRelayState int) bool {
-	switch mainRelayState {
-	case RelayIslanded:
-		d.islandedPolls++
-		d.connectedPolls = 0
-		if d.islandedPolls >= d.confirmPolls {
-			d.islanded = true
-		}
-	case RelayConnected:
-		d.connectedPolls++
-		d.islandedPolls = 0
-		if d.connectedPolls >= d.confirmPolls {
-			d.islanded = false
-		}
-	default:
-		d.islandedPolls = 0
-		d.connectedPolls = 0
+// values preserve the last confirmed state but reset the confirmation sequence.
+func (d *Detector) Observe(mainRelayState int) State {
+	next, stable := relayState(mainRelayState)
+	if !stable {
+		d.candidate = StateUnknown
+		d.candidateN = 0
+		return d.state
 	}
-	return d.islanded
+	if next == d.state {
+		d.candidate = StateUnknown
+		d.candidateN = 0
+		return d.state
+	}
+	if next != d.candidate {
+		d.candidate = next
+		d.candidateN = 1
+	} else {
+		d.candidateN++
+	}
+	if d.candidateN >= d.confirmPolls {
+		d.state = next
+		d.candidate = StateUnknown
+		d.candidateN = 0
+	}
+	return d.state
+}
+
+func relayState(mainRelayState int) (State, bool) {
+	switch mainRelayState {
+	case RelayGridDown:
+		return StateGridDown, true
+	case RelayConnected:
+		return StateConnected, true
+	case RelayManualDisconnected:
+		return StateManualDisconnected, true
+	default:
+		return StateUnknown, false
+	}
 }

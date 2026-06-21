@@ -37,6 +37,7 @@ var (
 		PVPowerW       float64
 		LoadPowerW     float64
 		MainRelayState int
+		GridState      outage.State
 		GridOutage     bool
 	}
 	statusMu sync.RWMutex
@@ -219,11 +220,13 @@ func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detecto
 	}
 
 	result := det.Observe(sample)
-	gridOutage := outageDet.Observe(sample.MainRelayState)
+	gridState := outageDet.Observe(sample.MainRelayState)
+	gridOutage := gridState == outage.StateGridDown
 
 	slog.Debug("sample",
 		"state", result.State,
 		"grid_outage", gridOutage,
+		"grid_state", gridState,
 		"main_relay", sample.MainRelayState,
 		"soc", sample.SOC,
 		"battery_w", sample.BatteryPowerW,
@@ -243,7 +246,7 @@ func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detecto
 
 	// Publish one coherent snapshot for the independently running tray updater.
 	statusMu.Lock()
-	previousGridOutage := Status.GridOutage
+	previousGridState := Status.GridState
 	Status.SOC = sample.SOC
 	Status.State = result.State
 	Status.BatteryPowerW = sample.BatteryPowerW
@@ -251,12 +254,16 @@ func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detecto
 	Status.LoadPowerW = sample.LoadPowerW
 	Status.PVPowerW = sample.PVPowerW
 	Status.MainRelayState = sample.MainRelayState
+	Status.GridState = gridState
 	Status.GridOutage = gridOutage
 	statusMu.Unlock()
-	if gridOutage != previousGridOutage {
-		if gridOutage {
+	if gridState != previousGridState {
+		switch gridState {
+		case outage.StateGridDown:
 			slog.Warn("grid outage detected", "main_relay_state", sample.MainRelayState)
-		} else {
+		case outage.StateManualDisconnected:
+			slog.Info("grid manually disconnected", "main_relay_state", sample.MainRelayState)
+		case outage.StateConnected:
 			slog.Info("grid connection restored", "main_relay_state", sample.MainRelayState)
 		}
 	}

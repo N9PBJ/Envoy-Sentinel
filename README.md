@@ -20,9 +20,9 @@ It normalizes the local gateway response into:
 - Solar production power
 - Load power
 - Demand-response diagnostic counters, when present
-- Main grid relay state for islanding detection
+- Main grid relay state for outage and manual-disconnect detection
 
-After two consecutive `main_relay_state = 2` readings, the tray icon flashes between the current battery level and a red outage icon. Grid restoration likewise requires two consecutive `main_relay_state = 1` readings; transitional state `3` preserves the last confirmed state.
+After two consecutive `main_relay_state = 0` readings, the tray icon flashes between the current battery level and a red outage icon. State `2` is shown as a manual grid disconnect without an outage alert. Grid restoration likewise requires two consecutive `main_relay_state = 1` readings; transitional state `3` preserves the last confirmed state.
 
 The local API does not currently expose a documented `DR event active` field, so the app uses a heuristic detector.
 

@@ -108,7 +108,11 @@ func main() {
 	}
 
 	// Initialize the emailer
-	emailer := notify.NewEmailer(cfg.SMTP)
+	var emailer emailSender
+	if cfg.SMTPNotifications {
+		emailer = notify.NewEmailer(cfg.SMTP)
+	}
+	slog.Info("SMTP notifications configured", "enabled", cfg.SMTPNotifications)
 	// Initialize the envoy client
 	client, err := gateway.NewClient(cfg.GatewayURL, "", cfg.AllowInsecureTLS)
 	if err != nil {
@@ -265,18 +269,31 @@ func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detecto
 }
 
 func notifyTransition(det *detector.Detector, emailer emailSender, statePath string, result detector.Result) error {
-	var subject, body string
 	switch result.Transition {
 	case detector.NoTransition:
 		return nil
-	case detector.Started:
-		subject = "DR Event Started"
-		body = startedBody(result)
-	case detector.Ended:
-		subject = "DR Event Ended"
-		body = endedBody(result)
+	case detector.Started, detector.Ended:
+		// Handled below.
 	default:
 		return fmt.Errorf("unknown detector transition %q", result.Transition)
+	}
+
+	if emailer == nil {
+		det.AcknowledgeTransition(result.Transition)
+		if err := state.Save(statePath, det.Snapshot()); err != nil {
+			return fmt.Errorf("save %s transition with notifications disabled: %w", result.Transition, err)
+		}
+		slog.Info("DR event transition detected", "transition", result.Transition, "notification", "disabled", "reason", result.Reason)
+		return nil
+	}
+
+	var subject, body string
+	if result.Transition == detector.Started {
+		subject = "DR Event Started"
+		body = startedBody(result)
+	} else {
+		subject = "DR Event Ended"
+		body = endedBody(result)
 	}
 
 	if err := emailer.Send(subject, body); err != nil {

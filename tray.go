@@ -186,6 +186,10 @@ func onReady(cancel context.CancelFunc, emailer emailSender) {
 	systray.AddSeparator()
 	mConfig := systray.AddMenuItem("Open Config", "")
 	mTestEmail := systray.AddMenuItem("Send Test Email...", "Click twice to confirm")
+	if emailer == nil {
+		mTestEmail.SetTitle("Email Notifications Disabled")
+		mTestEmail.Disable()
+	}
 
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "")
@@ -206,6 +210,9 @@ func onReady(cancel context.CancelFunc, emailer emailSender) {
 				systray.Quit()
 				return
 			case <-mTestEmail.ClickedCh:
+				if emailer == nil {
+					continue
+				}
 				if confirmationExpired == nil {
 					mTestEmail.SetTitle("Confirm Send Test Email")
 					confirmationTimer = time.NewTimer(confirmationWindow)

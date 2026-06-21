@@ -21,17 +21,18 @@ type SMTP struct {
 const defaultPollInterval = 30 * time.Second
 
 type Config struct {
-	GatewayURL       string
-	GatewaySerial    string
-	EnphaseUsername  string
-	EnphasePassword  string
-	ReserveSOC       int
-	PollInterval     time.Duration
-	AllowInsecureTLS bool
-	StatePath        string
-	SMTP             SMTP
-	Logfile          string
-	Debug            bool
+	GatewayURL        string
+	GatewaySerial     string
+	EnphaseUsername   string
+	EnphasePassword   string
+	ReserveSOC        int
+	PollInterval      time.Duration
+	AllowInsecureTLS  bool
+	StatePath         string
+	SMTPNotifications bool
+	SMTP              SMTP
+	Logfile           string
+	Debug             bool
 }
 
 func Load(args []string) (Config, error) {
@@ -44,6 +45,7 @@ func Load(args []string) (Config, error) {
 	fs.BoolVar(&cfg.AllowInsecureTLS, "insecure-tls", envBool("ENPHASE_INSECURE_TLS", true), "allow the gateway self-signed TLS certificate")
 	fs.StringVar(&cfg.StatePath, "state-file", envString("DRLISTENER_STATE_FILE", "drlistener-state.json"), "state file path")
 	fs.BoolVar(&cfg.Debug, "debug", false, "enable debug logs and save raw API responses")
+	fs.BoolVar(&cfg.SMTPNotifications, "smtp-notifications", envBool("SMTP_NOTIFICATIONS_ENABLED", false), "send DR transition notifications by email")
 
 	fs.StringVar(&cfg.SMTP.Host, "smtp-host", envString("SMTP_HOST", ""), "SMTP server host")
 	fs.IntVar(&cfg.SMTP.Port, "smtp-port", envInt("SMTP_PORT", 587), "SMTP server port")
@@ -69,10 +71,10 @@ func Load(args []string) (Config, error) {
 	if cfg.PollInterval <= 0 {
 		return Config{}, errors.New("poll interval must be greater than zero")
 	}
-	if cfg.SMTP.Host == "" || cfg.SMTP.From == "" || cfg.SMTP.To == "" {
+	if cfg.SMTPNotifications && (cfg.SMTP.Host == "" || cfg.SMTP.From == "" || cfg.SMTP.To == "") {
 		return Config{}, errors.New("SMTP_HOST, SMTP_FROM, and SMTP_TO are required")
 	}
-	if cfg.SMTP.Port <= 0 || cfg.SMTP.Port > 65535 {
+	if cfg.SMTPNotifications && (cfg.SMTP.Port <= 0 || cfg.SMTP.Port > 65535) {
 		return Config{}, fmt.Errorf("invalid SMTP port %d", cfg.SMTP.Port)
 	}
 

@@ -1,6 +1,6 @@
 # Enphase DR Listener
 
-Enphase DR Listener is a small Go service that watches an Enphase IQ Gateway on the local network and sends an email when it infers that a demand response event has started or ended.
+Enphase DR Listener is a small Go service that watches an Enphase IQ Gateway on the local network and can send an email when it infers that a demand response event has started or ended.
 
 The app polls the IQ Gateway local API over HTTPS. At startup it uses the system owner's Enphase credentials and the configured gateway serial number to obtain the required bearer token automatically.
 
@@ -37,7 +37,7 @@ On startup, `main.go` loads configuration, obtains an Enphase bearer token, rest
 
 The gateway client refreshes its bearer token and retries once after an HTTP 401. The token and account credentials remain in memory and are never intentionally logged or persisted.
 
-Transition notifications use a small persistent outbox: a start or end transition remains pending until SMTP delivery succeeds. This favors eventual delivery over strict deduplication; a crash after SMTP accepts a message but before its acknowledgement is saved can produce a duplicate rather than silently losing the event.
+When SMTP notifications are enabled, transitions use a small persistent outbox: a start or end transition remains pending until delivery succeeds. This favors eventual delivery over strict deduplication; a crash after SMTP accepts a message but before its acknowledgement is saved can produce a duplicate rather than silently losing the event.
 
 ## Detection Heuristic
 
@@ -62,7 +62,7 @@ This avoids treating normal battery self-consumption, such as a large AC load, a
 - Windows 10 or newer on an amd64 or arm64 machine
 - Machine running on the same LAN as the Enphase IQ Gateway
 - Enphase system-owner account
-- SMTP account for notifications
+- SMTP account if email notifications are enabled
 
 Go 1.26 or newer is required only when running from source. The gateway commonly uses a self-signed TLS certificate, which the app allows by default.
 
@@ -75,20 +75,23 @@ $env:ENPHASE_USERNAME = 'owner@example.com'
 $env:ENPHASE_PASSWORD = 'your-enphase-password'
 $env:ENPHASE_GATEWAY_SERIAL = 'your-gateway-serial-number'
 $env:ENPHASE_RESERVE_SOC = '20'
-$env:SMTP_HOST = 'smtp.example.com'
-$env:SMTP_FROM = 'drlistener@example.com'
-$env:SMTP_TO = 'you@example.com'
 ```
 
 These values may be set directly in the process environment or placed in an optional `.env` file beside the executable.
 
-Usually required for authenticated SMTP:
+SMTP notifications are disabled by default. To enable them, configure:
 
 ```powershell
+$env:SMTP_NOTIFICATIONS_ENABLED = 'true'
+$env:SMTP_HOST = 'smtp.example.com'
 $env:SMTP_PORT = '587'
 $env:SMTP_USER = 'smtp-user'
 $env:SMTP_PASS = 'smtp-password'
+$env:SMTP_FROM = 'drlistener@example.com'
+$env:SMTP_TO = 'you@example.com'
 ```
+
+`SMTP_USER` and `SMTP_PASS` may be omitted when the SMTP server does not require authentication. When notifications are disabled, no SMTP settings are required and the tray's test-email item is disabled.
 
 Optional environment variables:
 
@@ -107,6 +110,8 @@ Command-line flags can also be used:
 -poll-interval   poll interval, default 30s
 -insecure-tls    allow self-signed gateway TLS certificate, default true
 -state-file      persistent detector state file, default drlistener-state.json
+-smtp-notifications
+                  send DR transition emails, default false
 -smtp-host       SMTP host
 -smtp-port       SMTP port, default 587
 -smtp-user       SMTP username
@@ -159,7 +164,7 @@ If `go` is not on PATH but installed in the default Windows location:
 & 'C:\Program Files\Go\bin\go.exe' run .
 ```
 
-To test SMTP, open the tray menu and click **Send Test Email...**. Click the confirmation item within 10 seconds to send; otherwise it cancels automatically. Delivery happens in the background so the tray and gateway polling remain responsive.
+When SMTP notifications are enabled, test them from the tray menu by clicking **Send Test Email...**. Click the confirmation item within 10 seconds to send; otherwise it cancels automatically. Delivery happens in the background so the tray and gateway polling remain responsive.
 
 To build the executable yourself:
 

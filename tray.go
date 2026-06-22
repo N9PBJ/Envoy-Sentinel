@@ -41,26 +41,19 @@ var (
 )
 
 func batteryBucket(soc float64) int {
-	// Icons are available at 0, 33, 66, and 100 percent. Midpoints make the
-	// selected icon the closest visual representation of the actual SOC.
 	switch {
 	case soc < 16.5:
-		return 0 // 0%
-
+		return 0
 	case soc < 49.5:
-		return 1 // 33%
-
+		return 1
 	case soc < 83.5:
-		return 2 // 66%
-
+		return 2
 	default:
-		return 3 // 100%
+		return 3
 	}
 }
 
 func batteryStatus(w float64) string {
-	// Gateway normalization uses positive battery power for discharge and
-	// negative power for charge. Ignore +/-100 W as measurement noise/idle.
 	switch {
 	case w > 100:
 		return fmt.Sprintf("Battery: %.1f kW Discharging", w/1000)
@@ -78,10 +71,16 @@ func gridStatus(gridState outage.State, mainRelayState int, powerW float64) stri
 	case outage.StateManualDisconnected:
 		return "Grid: Manually Disconnected"
 	}
-	if mainRelayState == 3 {
+	if mainRelayState == outage.RelayTransition {
 		return "Grid: Reconnecting"
 	}
-	return fmt.Sprintf("Grid: %.1f kW", powerW/1000)
+	if powerW < -100 {
+		return fmt.Sprintf("Grid: %.1f kW Exporting", -powerW/1000)
+	}
+	if powerW > 100 {
+		return fmt.Sprintf("Grid: %.1f kW Importing", powerW/1000)
+	}
+	return "Grid: Idle"
 }
 
 func gridTooltip(gridState outage.State, powerW float64) string {
@@ -94,99 +93,70 @@ func gridTooltip(gridState outage.State, powerW float64) string {
 	return fmt.Sprintf("%.1fkW", powerW/1000)
 }
 
+func statusSnapshot() liveStatusSnapshot {
+	statusMu.RLock()
+	defer statusMu.RUnlock()
+	return Status
+}
+
+// trayUpdater refreshes the lightweight menu and icon once per second from the
+// same published snapshot used by the independently animated live window.
 func trayUpdater() {
-	var icons = [][]byte{
-		battery0,
-		battery33,
-		battery66,
-		battery100,
-	}
-
+	icons := [][]byte{battery0, battery33, battery66, battery100}
 	var flash bool
-
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		statusMu.RLock()
-		s := Status
-		statusMu.RUnlock()
-
-		socBucket := batteryBucket(s.SOC)
-
-		// An outage takes visual priority over a DR event. Flashing against the
-		// battery icon preserves SOC visibility while still attracting attention.
+		s := statusSnapshot()
+		bucket := batteryBucket(s.SOC)
 		if s.GridOutage {
 			flash = !flash
-
 			if flash {
 				systray.SetIcon(outageICO)
 			} else {
-				systray.SetIcon(icons[socBucket])
+				systray.SetIcon(icons[bucket])
 			}
 		} else if s.State == detector.Active {
 			flash = !flash
-
 			if flash {
 				systray.SetIcon(alertICO)
 			} else {
-				systray.SetIcon(icons[socBucket])
+				systray.SetIcon(icons[bucket])
 			}
 		} else {
-			systray.SetIcon(icons[socBucket])
+			systray.SetIcon(icons[bucket])
 		}
 
-		mDREvent.SetTitle(
-			fmt.Sprintf("DR Event: %s", s.State),
-		)
-
-		mSOC.SetTitle(
-			fmt.Sprintf("SOC: %.0f%%", s.SOC),
-		)
-
+		mDREvent.SetTitle(fmt.Sprintf("DR Event: %s", s.State))
+		mSOC.SetTitle(fmt.Sprintf("SOC: %.0f%%", s.SOC))
 		mBattery.SetTitle(batteryStatus(s.BatteryPowerW))
-
 		mGrid.SetTitle(gridStatus(s.GridState, s.MainRelayState, s.GridPowerW))
-
-		mSolar.SetTitle(
-			fmt.Sprintf("Solar: %.1f kW", s.PVPowerW/1000),
-		)
-
-		mHouse.SetTitle(
-			fmt.Sprintf("House: %.1f kW", s.LoadPowerW/1000),
-		)
-
-		systray.SetTooltip(
-			fmt.Sprintf(
-				"SOC %.0f%% | Grid %s | DR Event %s",
-				s.SOC,
-				gridTooltip(s.GridState, s.GridPowerW),
-				s.State,
-			),
-		)
+		mSolar.SetTitle(fmt.Sprintf("Solar: %.1f kW", s.PVPowerW/1000))
+		mHouse.SetTitle(fmt.Sprintf("House: %.1f kW", s.LoadPowerW/1000))
+		systray.SetTooltip(fmt.Sprintf("SOC %.0f%% | Grid %s | DR Event %s", s.SOC, gridTooltip(s.GridState, s.GridPowerW), s.State))
 	}
 }
 
-func onReady(cancel context.CancelFunc, emailer emailSender) {
+// onReady builds the tray menu. Menu actions remain responsive because window
+// work, test email delivery, and telemetry polling run outside systray's loop.
+func onReady(cancel context.CancelFunc, emailer emailSender, liveWindow *liveStatusWindow) {
 	systray.SetIcon(battery100)
 	systray.SetTitle("Envoy Sentinel")
 	systray.SetTooltip("Enphase DR Event Watcher")
 
+	mLiveStatus := systray.AddMenuItem("Open Live Status", "Show live power flow")
+	systray.AddSeparator()
 	mDREvent = systray.AddMenuItem("DR Event: --", "")
 	mDREvent.Disable()
-
 	mSOC = systray.AddMenuItem("SOC: --", "")
 	mSOC.Disable()
-
 	mBattery = systray.AddMenuItem("Battery: --", "")
 	mBattery.Disable()
-
 	mGrid = systray.AddMenuItem("Grid: --", "")
 	mGrid.Disable()
-
 	mSolar = systray.AddMenuItem("Solar: --", "")
 	mSolar.Disable()
-
 	mHouse = systray.AddMenuItem("House: --", "")
 	mHouse.Disable()
 
@@ -197,7 +167,6 @@ func onReady(cancel context.CancelFunc, emailer emailSender) {
 		mTestEmail.SetTitle("Email Notifications Disabled")
 		mTestEmail.Disable()
 	}
-
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "")
 
@@ -206,9 +175,12 @@ func onReady(cancel context.CancelFunc, emailer emailSender) {
 		var confirmationTimer *time.Timer
 		var confirmationExpired <-chan time.Time
 		testEmailResult := make(chan error, 1)
-
 		for {
 			select {
+			case <-mLiveStatus.ClickedCh:
+				if liveWindow != nil {
+					liveWindow.Show()
+				}
 			case <-mQuit.ClickedCh:
 				if confirmationTimer != nil {
 					confirmationTimer.Stop()
@@ -226,16 +198,12 @@ func onReady(cancel context.CancelFunc, emailer emailSender) {
 					confirmationExpired = confirmationTimer.C
 					continue
 				}
-
 				confirmationTimer.Stop()
 				confirmationExpired = nil
 				mTestEmail.SetTitle("Sending Test Email...")
 				mTestEmail.Disable()
 				go func() {
-					testEmailResult <- emailer.Send(
-						"Envoy Sentinel Test",
-						fmt.Sprintf("Envoy Sentinel SMTP configuration is working.\n\nSent: %s\n", time.Now().Format(time.RFC1123)),
-					)
+					testEmailResult <- emailer.Send("Envoy Sentinel Test", fmt.Sprintf("Envoy Sentinel SMTP configuration is working.\n\nSent: %s\n", time.Now().Format(time.RFC1123)))
 				}()
 			case <-confirmationExpired:
 				confirmationExpired = nil
@@ -251,12 +219,7 @@ func onReady(cancel context.CancelFunc, emailer emailSender) {
 					slog.Info("test email sent")
 				}
 			case <-mConfig.ClickedCh:
-				err := exec.Command(
-					"notepad.exe",
-					configFile,
-				).Start()
-
-				if err != nil {
+				if err := exec.Command("notepad.exe", configFile).Start(); err != nil {
 					slog.Error("open config", "error", err)
 				}
 			}
@@ -266,5 +229,4 @@ func onReady(cancel context.CancelFunc, emailer emailSender) {
 	go trayUpdater()
 }
 
-func onExit() {
-}
+func onExit() {}

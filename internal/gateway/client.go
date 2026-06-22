@@ -62,10 +62,6 @@ func (c *Client) bearerToken() string {
 	return c.token
 }
 
-// type Info struct {
-// 	Raw map[string]any
-// }
-
 type MeterDetails struct {
 	EID             int    `json:"eid"`
 	State           string `json:"state"`
@@ -531,7 +527,7 @@ func milliwattsToWatts(value float64) float64 {
 	return value / 1000
 }
 
-// objectAt : Retrieves an 'object' (map) at the given key as a map[string]any
+// objectAt retrieves an object at key as a map of JSON-compatible values.
 func objectAt(parent map[string]any, key string) (map[string]any, bool) {
 	value, ok := parent[key]
 	if !ok {
@@ -541,7 +537,7 @@ func objectAt(parent map[string]any, key string) (map[string]any, bool) {
 	return obj, ok
 }
 
-// numberAt : Retrievs a number at the given key as a float64
+// numberAt retrieves a numeric value at key as a float64.
 func numberAt(parent map[string]any, key string) (float64, bool) {
 	value, ok := parent[key]
 	if !ok {

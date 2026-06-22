@@ -41,7 +41,7 @@ func Load(args []string) (Config, error) {
 	fs := flag.NewFlagSet("envoy-sentinel", flag.ContinueOnError)
 	fs.StringVar(&cfg.GatewayURL, "gateway-url", envString("ENPHASE_GATEWAY_URL", "https://envoy.local"), "IQ Gateway base URL")
 	fs.IntVar(&cfg.ReserveSOC, "reserve-soc", envInt("ENPHASE_RESERVE_SOC", -1), "configured battery reserve SOC percentage")
-	fs.DurationVar(&cfg.PollInterval, "poll-interval", envDuration("DRLISTENER_POLL_INTERVAL", defaultPollInterval), "poll interval")
+	fs.DurationVar(&cfg.PollInterval, "poll-interval", envDuration("DRLISTENER_POLL_INTERVAL", defaultPollInterval), "startup poll interval")
 	fs.BoolVar(&cfg.AllowInsecureTLS, "insecure-tls", envBool("ENPHASE_INSECURE_TLS", true), "allow the gateway self-signed TLS certificate")
 	fs.StringVar(&cfg.StatePath, "state-file", envString("DRLISTENER_STATE_FILE", "drlistener-state.json"), "state file path")
 	fs.BoolVar(&cfg.Debug, "debug", false, "enable debug logs and save raw API responses")

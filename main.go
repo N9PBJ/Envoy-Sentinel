@@ -26,22 +26,37 @@ import (
 const configFile = ".env"
 
 var (
-	// Status is the most recent normalized gateway reading. pollOnce writes it
-	// under statusMu; the tray updater takes a snapshot under the same lock so
-	// network polling never blocks on Windows UI work.
-	Status struct {
-		SOC            float64
-		State          detector.State
-		BatteryPowerW  float64
-		GridPowerW     float64
-		PVPowerW       float64
-		LoadPowerW     float64
-		MainRelayState int
-		GridState      outage.State
-		GridOutage     bool
-	}
+	// Status is the most recent normalized gateway reading. pollOnce publishes
+	// it under statusMu; the tray and live-status renderers copy it under the
+	// same lock so network polling never blocks on Windows UI work.
+	Status   liveStatusSnapshot
 	statusMu sync.RWMutex
+
+	// The selector in the live-status window updates runtimePollInterval and
+	// sends the newest value to the polling goroutine. The buffered channel is
+	// deliberately latest-value-wins so the Windows UI thread never blocks.
+	pollMu              sync.RWMutex
+	runtimePollInterval time.Duration
+	pollIntervalChanges = make(chan time.Duration, 1)
 )
+
+// liveStatusSnapshot is the immutable-by-convention value copied by each UI
+// consumer. HasSample distinguishes a real all-zero reading from startup.
+// LastError describes only the newest failed poll; a successful poll clears it.
+type liveStatusSnapshot struct {
+	SOC            float64
+	State          detector.State
+	BatteryPowerW  float64
+	GridPowerW     float64
+	PVPowerW       float64
+	LoadPowerW     float64
+	MainRelayState int
+	GridState      outage.State
+	GridOutage     bool
+	UpdatedAt      time.Time
+	HasSample      bool
+	LastError      string
+}
 
 type emailSender interface {
 	Send(subject, body string) error
@@ -58,7 +73,7 @@ func initLogging(logFilename string, debug bool) error {
 	}
 
 	// Keep console output for interactive runs while retaining a persistent log
-	// for the tray application, which normally has no visible console.
+	// for the desktop application, whose release build has no visible console.
 	mw := io.MultiWriter(os.Stdout, logfile)
 	level := slog.LevelInfo
 	if debug {
@@ -87,6 +102,7 @@ func main() {
 	go func() {
 		<-ctx.Done()
 		slog.Info("shutdown requested")
+		quitLiveStatusWindow()
 		systray.Quit()
 	}()
 
@@ -141,10 +157,12 @@ func main() {
 	outageDet := outage.New(2)
 	slog.Info("detector initialized", "state", det.Snapshot().State, "reserve_soc", cfg.ReserveSOC, "poll_interval", cfg.PollInterval)
 
+	initializePollInterval(cfg.PollInterval)
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
 	if err := pollOnce(ctx, client, det, outageDet, emailer, cfg.StatePath, cfg.Debug); err != nil {
+		publishPollError(err)
 		slog.Error("poll failed", "error", err)
 	}
 
@@ -153,20 +171,65 @@ func main() {
 			select {
 			case <-ctx.Done():
 				return
+			case interval := <-pollIntervalChanges:
+				ticker.Reset(interval)
+				slog.Info("poll interval changed", "poll_interval", interval)
 			case <-ticker.C:
 				if err := pollOnce(ctx, client, det, outageDet, emailer, cfg.StatePath, cfg.Debug); err != nil {
+					publishPollError(err)
 					slog.Error("poll failed", "error", err)
 				}
 			}
 		}
 	}()
 
+	liveWindow, err := startLiveStatusWindow(cfg.ReserveSOC)
+	if err != nil {
+		slog.Error("start live status window", "error", err)
+	}
 	systray.Run(
 		func() {
-			onReady(stop, emailer)
+			onReady(stop, emailer, liveWindow)
 		}, onExit)
 	defer systray.Quit()
+}
 
+func initializePollInterval(interval time.Duration) {
+	pollMu.Lock()
+	runtimePollInterval = interval
+	pollMu.Unlock()
+}
+
+func currentPollInterval() time.Duration {
+	pollMu.RLock()
+	defer pollMu.RUnlock()
+	return runtimePollInterval
+}
+
+// setPollInterval applies a runtime-only override. It does not rewrite .env or
+// trigger an immediate poll; the polling goroutine resets its ticker and waits
+// for one complete interval.
+func setPollInterval(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	pollMu.Lock()
+	if runtimePollInterval == interval {
+		pollMu.Unlock()
+		return
+	}
+	runtimePollInterval = interval
+	pollMu.Unlock()
+
+	select {
+	case pollIntervalChanges <- interval:
+	default:
+		select {
+		case <-pollIntervalChanges:
+		default:
+		}
+		pollIntervalChanges <- interval
+	}
 }
 
 func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detector, outageDet *outage.Detector, emailer emailSender, statePath string, debug bool) error {
@@ -244,7 +307,8 @@ func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detecto
 		return fmt.Errorf("save state: %w", err)
 	}
 
-	// Publish one coherent snapshot for the independently running tray updater.
+	// Publish one coherent snapshot for the independently running tray updater
+	// and live-status renderer.
 	statusMu.Lock()
 	previousGridState := Status.GridState
 	Status.SOC = sample.SOC
@@ -256,6 +320,9 @@ func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detecto
 	Status.MainRelayState = sample.MainRelayState
 	Status.GridState = gridState
 	Status.GridOutage = gridOutage
+	Status.UpdatedAt = sample.At
+	Status.HasSample = true
+	Status.LastError = ""
 	statusMu.Unlock()
 	if gridState != previousGridState {
 		switch gridState {
@@ -273,6 +340,12 @@ func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detecto
 	}
 
 	return nil
+}
+
+func publishPollError(err error) {
+	statusMu.Lock()
+	Status.LastError = err.Error()
+	statusMu.Unlock()
 }
 
 func notifyTransition(det *detector.Detector, emailer emailSender, statePath string, result detector.Result) error {

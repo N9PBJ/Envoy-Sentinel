@@ -28,12 +28,40 @@ The local API does not currently expose a documented `DR event active` field, so
 
 ## How the Pieces Fit Together
 
-On startup, `main.go` loads configuration, obtains an Enphase bearer token, restores the detector snapshot, and starts the tray UI. A polling goroutine then repeats this flow:
+On startup, `main.go` loads configuration, obtains an Enphase bearer token,
+restores the detector snapshot, performs an initial poll, and starts the tray
+and live-status UI. A polling goroutine then repeats this flow:
 
 1. Fetch and normalize `/ivp/livedata/status` into a gateway sample.
 2. Pass the sample through the DR-event and grid-outage detectors.
 3. Persist the DR detector snapshot and any pending transition notification.
-4. Publish a locked status snapshot for the independently running tray updater.
+4. Publish one locked status snapshot for the independently running tray and
+   live-status renderers.
+5. Deliver and acknowledge any pending transition notification.
+
+## Live Status Window
+
+Envoy Sentinel opens a native live-status window at startup. Open it again at
+any time from **Open Live Status** in the tray menu. Closing the window hides it
+without stopping monitoring; opening it again starts a new 15-minute viewing
+session. Like the Enphase live view, the window automatically hides when that
+countdown expires. The countdown controls the viewing window only: background
+gateway polling, detection, persistence, tray updates, and notifications keep
+running.
+
+The diagram displays solar production, house consumption, grid import or
+export, battery charging or discharging, battery charge, profile/DR status, and
+grid connection state. Moving dots show the direction of active power flow.
+The displayed **Demand Response** profile is the detector's inferred state;
+the local gateway API does not provide a documented official profile name.
+
+The **Controller polling** selector below the diagram shows the active polling
+interval and can change it without restarting the app. Presets are 5, 10, 15,
+or 30 seconds and 1, 2, or 5 minutes. A different configured startup value is
+also included in the list. Selecting a value resets the ticker, so the next
+poll occurs after one complete interval rather than immediately. This is a
+runtime override only; the next launch starts with
+`DRLISTENER_POLL_INTERVAL` from `.env` (or 30 seconds when it is unset).
 
 The gateway client refreshes its bearer token and retries once after an HTTP 401. The token and account credentials remain in memory and are never intentionally logged or persisted.
 
@@ -97,7 +125,7 @@ Optional environment variables:
 
 ```powershell
 $env:ENPHASE_GATEWAY_URL = 'https://envoy.local'
-$env:DRLISTENER_POLL_INTERVAL = '30s'
+$env:DRLISTENER_POLL_INTERVAL = '30s' # startup interval; the UI can override it until restart
 $env:DRLISTENER_STATE_FILE = 'drlistener-state.json'
 $env:ENPHASE_INSECURE_TLS = 'true'
 ```
@@ -107,7 +135,7 @@ Command-line flags can also be used:
 ```text
 -gateway-url     IQ Gateway base URL, default https://envoy.local
 -reserve-soc     configured battery reserve SOC percentage
--poll-interval   poll interval, default 30s
+-poll-interval   startup poll interval, default 30s
 -insecure-tls    allow self-signed gateway TLS certificate, default true
 -state-file      persistent detector state file, default drlistener-state.json
 -smtp-notifications
@@ -137,7 +165,11 @@ Set-Location .\envoy-sentinel
 .\envoy-sentinel.exe
 ```
 
-The release archive contains only `envoy-sentinel.exe`. Tray icons are embedded in the executable. The state file, log, and optional `debug/` directory are created at runtime; credentials and `.env` are deliberately never included in a release.
+The release archive contains only `envoy-sentinel.exe`. Tray icons, the native
+live-status UI, and the Windows Common Controls/DPI manifest are embedded in
+the executable. The state file, log, and optional `debug/` directory are
+created at runtime; credentials and `.env` are deliberately never included in
+a release.
 
 Published releases also include `checksums.txt`, which can be used to verify the downloaded archive:
 
@@ -173,6 +205,10 @@ go build -ldflags "-H=windowsgui" -o envoy-sentinel.exe .
 .\envoy-sentinel.exe -gateway-url https://envoy.local
 ```
 
+Architecture-specific `rsrc_windows_*.syso` files embed the application icon
+and Windows manifest automatically during `go build`; no separate resource
+compiler or C toolchain is required.
+
 ## State File
 
 The app writes a small JSON state file, default:
@@ -187,7 +223,12 @@ This restores active and provisional detector timing after a restart and retains
 
 The app uses Go's structured `slog` logger. Normal operation and state transitions are `INFO`, a confirmed grid outage is `WARN`, and failed operations are `ERROR`. Logs go to both standard output and the file selected by `-log-file`/`LOGFILE`; source locations are included. Passing `-debug` also enables `DEBUG` records, including per-poll telemetry samples.
 
-Debug mode calls several auxiliary gateway endpoints and saves their raw responses under `debug/` for offline investigation. Those calls are best-effort and do not stop normal live-data polling if one fails. Debug files may contain system telemetry, so review them before sharing.
+Debug mode calls several auxiliary gateway endpoints on every poll and saves
+their raw responses under `debug/` for offline investigation. Those calls are
+best-effort and do not stop normal live-data polling if one fails. Short
+runtime polling intervals therefore produce substantially more gateway traffic
+and debug files. Debug files may contain system telemetry, so review them
+before sharing.
 
 ## Tests
 
@@ -195,6 +236,13 @@ Run:
 
 ```powershell
 go test ./...
+```
+
+Run the same static checks used during development:
+
+```powershell
+go vet ./...
+golangci-lint run ./...
 ```
 
 If Go's default build cache is not writable in the current shell, use a local cache:

@@ -54,6 +54,7 @@ type liveStatusSnapshot struct {
 	GridState      outage.State
 	GridOutage     bool
 	UpdatedAt      time.Time
+	SampleAt       time.Time
 	HasSample      bool
 	LastError      string
 }
@@ -161,7 +162,7 @@ func main() {
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
-	if err := pollOnce(ctx, client, det, outageDet, emailer, cfg.StatePath, cfg.Debug); err != nil {
+	if err := pollOnce(ctx, client, det, outageDet, emailer, cfg.StatePath, cfg.DumpAPIResponses); err != nil {
 		publishPollError(err)
 		slog.Error("poll failed", "error", err)
 	}
@@ -175,7 +176,7 @@ func main() {
 				ticker.Reset(interval)
 				slog.Info("poll interval changed", "poll_interval", interval)
 			case <-ticker.C:
-				if err := pollOnce(ctx, client, det, outageDet, emailer, cfg.StatePath, cfg.Debug); err != nil {
+				if err := pollOnce(ctx, client, det, outageDet, emailer, cfg.StatePath, cfg.DumpAPIResponses); err != nil {
 					publishPollError(err)
 					slog.Error("poll failed", "error", err)
 				}
@@ -232,52 +233,53 @@ func setPollInterval(interval time.Duration) {
 	}
 }
 
-func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detector, outageDet *outage.Detector, emailer emailSender, statePath string, debug bool) error {
-	// Debug mode captures the gateway's auxiliary endpoints for later analysis.
+func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detector, outageDet *outage.Detector, emailer emailSender, statePath string, dumpAPIResponses bool) error {
+	// Raw-response capture includes auxiliary endpoints for later analysis.
 	// These calls are diagnostic only: a failure must not prevent the primary
 	// live-data sample from driving detection and notifications.
-	if debug {
-		_, err := client.MeterDetails(ctx, debug)
+	if dumpAPIResponses {
+		_, err := client.MeterDetails(ctx, true)
 		if err != nil {
 			slog.Error("fetch meter details", "error", err)
 		}
 
-		_, err = client.MeterReadings(ctx, debug)
+		_, err = client.MeterReadings(ctx, true)
 		if err != nil {
 			slog.Error("fetch meter readings", "error", err)
 		}
 
-		_, err = client.ProductionMeterData(ctx, debug)
+		_, err = client.ProductionMeterData(ctx, true)
 		if err != nil {
 			slog.Error("fetch production meter data", "error", err)
 		}
 
-		_, err = client.EnergyData(ctx, debug)
+		_, err = client.EnergyData(ctx, true)
 		if err != nil {
 			slog.Error("fetch energy data", "error", err)
 		}
 
-		_, err = client.InverterProductionData(ctx, debug)
+		_, err = client.InverterProductionData(ctx, true)
 		if err != nil {
 			slog.Error("fetch inverter production data", "error", err)
 		}
 
-		_, err = client.PowerConsumptionData(ctx, debug)
+		_, err = client.PowerConsumptionData(ctx, true)
 		if err != nil {
 			slog.Error("fetch power consumption data", "error", err)
 		}
 
-		_, err = client.GridReadings(ctx, debug)
+		_, err = client.GridReadings(ctx, true)
 		if err != nil {
 			slog.Error("fetch inverter grid readings", "error", err)
 		}
 	}
 
-	raw, err := client.LiveData(ctx, debug)
+	raw, err := client.LiveData(ctx, dumpAPIResponses)
 	if err != nil {
 		return err
 	}
-	sample, err := gateway.Normalize(raw, time.Now())
+	receivedAt := time.Now()
+	sample, err := gateway.Normalize(raw, receivedAt)
 	if err != nil {
 		return err
 	}
@@ -320,7 +322,8 @@ func pollOnce(ctx context.Context, client *gateway.Client, det *detector.Detecto
 	Status.MainRelayState = sample.MainRelayState
 	Status.GridState = gridState
 	Status.GridOutage = gridOutage
-	Status.UpdatedAt = sample.At
+	Status.UpdatedAt = receivedAt
+	Status.SampleAt = sample.At
 	Status.HasSample = true
 	Status.LastError = ""
 	statusMu.Unlock()

@@ -321,9 +321,9 @@ func (w *liveStatusWindow) paint(c *walk.Canvas, _ walk.Rectangle) error {
 	}
 	r.drawFlow(flow, flowIdle, s.HasSample && s.LoadPowerW > 100, 280, 446, 421, 446, phase)
 	if s.BatteryPowerW > 100 {
-		r.drawFlow(flow, flowIdle, s.HasSample, 280, 579, 280, 446, phase)
+		r.drawFlow(flow, flowIdle, s.HasSample, 280, 565, 280, 446, phase)
 	} else {
-		r.drawFlow(flow, flowIdle, s.HasSample && s.BatteryPowerW < -100, 280, 446, 280, 579, phase)
+		r.drawFlow(flow, flowIdle, s.HasSample && s.BatteryPowerW < -100, 280, 446, 280, 565, phase)
 	}
 	r.fillCircle(flow, walk.Rectangle{X: 276, Y: 442, Width: 8, Height: 8})
 
@@ -343,24 +343,27 @@ func (w *liveStatusWindow) paint(c *walk.Canvas, _ walk.Rectangle) error {
 	}
 	r.centerText(houseCaption, w.font15, ink, 366, 507, 155, 24)
 
-	r.drawStorage(green, 280, 603)
+	r.drawStorage(green, 280, 589)
 	batteryValue, batteryState := batteryPresentation(s.BatteryPowerW)
 	if !s.HasSample {
 		batteryValue, batteryState = "-- kW", "Battery"
 	}
-	r.centerText(batteryValue, w.font20Bold, green, 190, 631, 180, 28)
-	r.centerText(batteryState, w.font15, ink, 190, 654, 180, 24)
+	r.centerText(batteryValue, w.font20Bold, green, 190, 617, 180, 28)
+	r.centerText(batteryState, w.font15, ink, 190, 640, 180, 24)
 
 	freshness := "Waiting for gateway data…"
 	if s.HasSample {
 		freshness = "Updated " + formatFreshness(s.UpdatedAt, time.Now())
+		if !s.SampleAt.IsZero() && s.UpdatedAt.Sub(s.SampleAt) >= 5*time.Second {
+			freshness += " · gateway sample " + formatAge(s.SampleAt, time.Now()) + " old"
+		}
 	}
 	if s.LastError != "" {
 		freshness += " · latest poll failed"
 	}
-	r.text(freshness, w.font11, muted, walk.Rectangle{X: 12, Y: 668, Width: 400, Height: 18}, false)
+	r.text(freshness, w.font11, muted, walk.Rectangle{X: 12, Y: 672, Width: 400, Height: 18}, false)
 	if s.GridOutage {
-		r.text("OUTAGE", w.font12, danger, walk.Rectangle{X: 470, Y: 668, Width: 75, Height: 18}, true)
+		r.text("OUTAGE", w.font12, danger, walk.Rectangle{X: 470, Y: 672, Width: 75, Height: 18}, true)
 	}
 	return r.err
 }
@@ -621,7 +624,30 @@ func formatFreshness(at, now time.Time) string {
 	if age < time.Minute {
 		return fmt.Sprintf("%d seconds ago", int(age.Seconds()))
 	}
-	return fmt.Sprintf("%d minutes ago", int(age.Minutes()))
+	minutes := int(age.Minutes())
+	if minutes == 1 {
+		return "1 minute ago"
+	}
+	return fmt.Sprintf("%d minutes ago", minutes)
+}
+
+func formatAge(at, now time.Time) string {
+	age := now.Sub(at)
+	if age < 0 {
+		age = 0
+	}
+	if age < time.Minute {
+		seconds := int(age.Seconds())
+		if seconds == 1 {
+			return "1 second"
+		}
+		return fmt.Sprintf("%d seconds", seconds)
+	}
+	minutes := int(age.Minutes())
+	if minutes == 1 {
+		return "1 minute"
+	}
+	return fmt.Sprintf("%d minutes", minutes)
 }
 
 // pollIntervalOptions returns the supported runtime presets plus a positive

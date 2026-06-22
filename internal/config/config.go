@@ -33,6 +33,7 @@ type Config struct {
 	SMTP              SMTP
 	Logfile           string
 	Debug             bool
+	DumpAPIResponses  bool
 }
 
 func Load(args []string) (Config, error) {
@@ -44,7 +45,8 @@ func Load(args []string) (Config, error) {
 	fs.DurationVar(&cfg.PollInterval, "poll-interval", envDuration("DRLISTENER_POLL_INTERVAL", defaultPollInterval), "startup poll interval")
 	fs.BoolVar(&cfg.AllowInsecureTLS, "insecure-tls", envBool("ENPHASE_INSECURE_TLS", true), "allow the gateway self-signed TLS certificate")
 	fs.StringVar(&cfg.StatePath, "state-file", envString("DRLISTENER_STATE_FILE", "drlistener-state.json"), "state file path")
-	fs.BoolVar(&cfg.Debug, "debug", false, "enable debug logs and save raw API responses")
+	fs.BoolVar(&cfg.Debug, "debug", envBool("DRLISTENER_DEBUG", false), "enable debug logging")
+	fs.BoolVar(&cfg.DumpAPIResponses, "dump-api-responses", envBool("DRLISTENER_DUMP_API_RESPONSES", false), "save raw gateway API responses under debug/")
 	fs.BoolVar(&cfg.SMTPNotifications, "smtp-notifications", envBool("SMTP_NOTIFICATIONS_ENABLED", false), "send DR transition notifications by email")
 
 	fs.StringVar(&cfg.SMTP.Host, "smtp-host", envString("SMTP_HOST", ""), "SMTP server host")

@@ -20,25 +20,26 @@ const (
 )
 
 type Config struct {
-	ReserveSOC             float64
-	StartDischargeW        float64
-	EndDischargeW          float64
-	GridExportW            float64
-	SurplusDischargeW      float64
-	ReserveMarginSOC       float64
-	ConfirmSOCDrop         float64
-	ActiveConsecutivePolls int
-	ConfirmActiveWithin    time.Duration
-	LowDischargeFor        time.Duration
-	ConfirmEndedAfter      time.Duration
-	HistoryWindow          time.Duration
+	ReserveSOC          float64
+	StartDischargeW     float64
+	EndDischargeW       float64
+	SurplusDischargeW   float64
+	ReserveMarginSOC    float64
+	ConfirmSOCDrop      float64
+	StartEvidenceFor    time.Duration
+	StartEvidenceWindow time.Duration
+	StartExcessEnergyWh float64
+	ConfirmActiveWithin time.Duration
+	LowDischargeFor     time.Duration
+	ConfirmEndedAfter   time.Duration
+	HistoryWindow       time.Duration
 }
 
 type Detector struct {
 	cfg                  Config
 	state                State
 	history              []gateway.Sample
-	sustainedDischarge   int
+	eventLikeSince       time.Time
 	suspectActiveAt      time.Time
 	suspectActiveSOC     float64
 	suspectEndedAt       time.Time
@@ -87,18 +88,19 @@ func DefaultConfig(reserveSOC int) Config {
 	// These are intentionally conservative heuristics, not values supplied by
 	// Enphase. See README.md for the evidence and timing behind each threshold.
 	return Config{
-		ReserveSOC:             float64(reserveSOC),
-		StartDischargeW:        1000,
-		EndDischargeW:          300,
-		GridExportW:            500,
-		SurplusDischargeW:      750,
-		ReserveMarginSOC:       2,
-		ConfirmSOCDrop:         2,
-		ActiveConsecutivePolls: 3,
-		ConfirmActiveWithin:    20 * time.Minute,
-		LowDischargeFor:        10 * time.Minute,
-		ConfirmEndedAfter:      15 * time.Minute,
-		HistoryWindow:          30 * time.Minute,
+		ReserveSOC:          float64(reserveSOC),
+		StartDischargeW:     1000,
+		EndDischargeW:       300,
+		SurplusDischargeW:   750,
+		ReserveMarginSOC:    2,
+		ConfirmSOCDrop:      2,
+		StartEvidenceFor:    30 * time.Second,
+		StartEvidenceWindow: 10 * time.Minute,
+		StartExcessEnergyWh: 150,
+		ConfirmActiveWithin: 20 * time.Minute,
+		LowDischargeFor:     10 * time.Minute,
+		ConfirmEndedAfter:   15 * time.Minute,
+		HistoryWindow:       30 * time.Minute,
 	}
 }
 
@@ -173,19 +175,40 @@ func (d *Detector) Observe(sample gateway.Sample) Result {
 
 	result := Result{State: d.state, Sample: sample}
 	if d.isEventLikeDischarge(sample) {
-		d.sustainedDischarge++
+		if d.eventLikeSince.IsZero() {
+			d.eventLikeSince = sample.At
+		}
 	} else {
-		d.sustainedDischarge = 0
+		d.eventLikeSince = time.Time{}
 	}
 
 	switch d.state {
 	case Inactive:
-		if d.sustainedDischarge >= d.cfg.ActiveConsecutivePolls {
+		// A DR candidate must accumulate meaningful battery energy beyond the
+		// current solar deficit of the house. This rejects both long periods of
+		// normal self-consumption and short control-loop overshoots after a
+		// solar ramp, without making sensitivity depend on poll frequency.
+		excessWh := d.recentExcessDispatchEnergy(sample.At.Add(-d.cfg.StartEvidenceWindow), sample.At)
+		if !d.eventLikeSince.IsZero() &&
+			sample.At.Sub(d.eventLikeSince) >= d.cfg.StartEvidenceFor &&
+			excessWh >= d.cfg.StartExcessEnergyWh {
 			d.state = SuspectActive
-			d.suspectActiveAt = sample.At
+			d.suspectActiveAt = d.eventLikeSince
 			d.suspectActiveSOC = d.highestRecentSOC(sample.At.Add(-d.cfg.ConfirmActiveWithin), sample.At)
 			result.State = d.state
-			result.Reason = d.eventLikeReason(sample)
+			result.Reason = fmt.Sprintf("%.0f Wh of excess battery dispatch accumulated; %s", excessWh, d.eventLikeReason(sample))
+			drop := d.suspectActiveSOC - sample.SOC
+			if drop >= d.cfg.ConfirmSOCDrop {
+				d.state = Active
+				d.activeEventStart = d.suspectActiveAt
+				d.activeEventStartSOC = d.suspectActiveSOC
+				d.estimatedDischargeWh = d.recentDischargeEnergy(d.activeEventStart, sample.At)
+				result.State = d.state
+				result.Transition = Started
+				result.EventStart = d.activeEventStart
+				result.StartSOC = d.activeEventStartSOC
+				result.Reason = fmt.Sprintf("%.0f Wh of excess battery dispatch accumulated and SOC dropped %.1f%%", excessWh, drop)
+			}
 		}
 	case SuspectActive:
 		if !d.isEventLikeDischarge(sample) {
@@ -266,28 +289,27 @@ func (d *Detector) isEventLikeDischarge(sample gateway.Sample) bool {
 	if sample.SOC <= d.cfg.ReserveSOC+d.cfg.ReserveMarginSOC {
 		return false
 	}
-	if sample.GridPowerW <= -d.cfg.GridExportW {
-		return true
-	}
-	if sample.LoadPowerW > 0 {
-		netHouseDemandAfterPV := sample.LoadPowerW - sample.PVPowerW
-		if netHouseDemandAfterPV < 0 {
-			netHouseDemandAfterPV = 0
-		}
-		return sample.BatteryPowerW-netHouseDemandAfterPV >= d.cfg.SurplusDischargeW
-	}
-	return false
+	return d.excessDispatchW(sample) >= d.cfg.SurplusDischargeW
 }
 
 func (d *Detector) eventLikeReason(sample gateway.Sample) string {
-	if sample.GridPowerW <= -d.cfg.GridExportW {
-		return fmt.Sprintf("sustained battery discharge %.0f W while exporting %.0f W to grid", sample.BatteryPowerW, -sample.GridPowerW)
-	}
 	netHouseDemandAfterPV := sample.LoadPowerW - sample.PVPowerW
 	if netHouseDemandAfterPV < 0 {
 		netHouseDemandAfterPV = 0
 	}
-	return fmt.Sprintf("sustained battery discharge %.0f W exceeds net house demand %.0f W", sample.BatteryPowerW, netHouseDemandAfterPV)
+	return fmt.Sprintf("battery discharge %.0f W exceeds solar deficit %.0f W by %.0f W", sample.BatteryPowerW, netHouseDemandAfterPV, d.excessDispatchW(sample))
+}
+
+func (d *Detector) excessDispatchW(sample gateway.Sample) float64 {
+	netHouseDemandAfterPV := sample.LoadPowerW - sample.PVPowerW
+	if netHouseDemandAfterPV < 0 {
+		netHouseDemandAfterPV = 0
+	}
+	excess := sample.BatteryPowerW - netHouseDemandAfterPV
+	if excess < 0 {
+		return 0
+	}
+	return excess
 }
 
 func (d *Detector) shouldSuspectEnded(sample gateway.Sample) bool {
@@ -377,6 +399,27 @@ func (d *Detector) recentDischargeEnergy(start, end time.Time) float64 {
 		if hours > 0 && hours <= 1 {
 			wattHours += current.BatteryPowerW * hours
 		}
+	}
+	return wattHours
+}
+
+func (d *Detector) recentExcessDispatchEnergy(start, end time.Time) float64 {
+	var wattHours float64
+	for i := 1; i < len(d.history); i++ {
+		previous := d.history[i-1]
+		current := d.history[i]
+		if current.At.Before(start) || current.At.After(end) {
+			continue
+		}
+		intervalStart := previous.At
+		if intervalStart.Before(start) {
+			intervalStart = start
+		}
+		hours := current.At.Sub(intervalStart).Hours()
+		if hours <= 0 || hours > 1 {
+			continue
+		}
+		wattHours += d.excessDispatchW(current) * hours
 	}
 	return wattHours
 }

@@ -60,6 +60,60 @@ func TestDetectorIgnoresShortDischarge(t *testing.T) {
 	}
 }
 
+func TestDetectorIgnoresBriefExportWhileServingHouse(t *testing.T) {
+	start := time.Date(2026, 6, 22, 13, 0, 0, 0, time.UTC)
+	d := New(DefaultConfig(90), Snapshot{})
+
+	// Self-consumption normally supplies the house. A sudden solar ramp can
+	// briefly make the still-discharging battery export before control catches
+	// up. Fast polling must not promote that transient to DR evidence.
+	for i := range 10 {
+		result := d.Observe(sample(start.Add(time.Duration(i)*time.Second), 97, 4000, -1800, 6000, 4200))
+		if result.State != Inactive || result.Transition != NoTransition {
+			t.Fatalf("after %d seconds state=%s transition=%q want inactive", i, result.State, result.Transition)
+		}
+	}
+
+	result := d.Observe(sample(start.Add(10*time.Second), 97, 2200, 0, 1800, 4000))
+	if result.State != Inactive || result.Transition != NoTransition {
+		t.Fatalf("after export settles state=%s transition=%q want inactive", result.State, result.Transition)
+	}
+}
+
+func TestDetectorStartEvidenceRequiresExcessEnergy(t *testing.T) {
+	start := time.Date(2026, 6, 22, 13, 0, 0, 0, time.UTC)
+	d := New(DefaultConfig(20), Snapshot{})
+
+	for i := range 120 {
+		result := d.Observe(sample(start.Add(time.Duration(i)*time.Second), 80, 5000, -1500, 0, 3500))
+		if result.State != Inactive {
+			t.Fatalf("after %d seconds state=%s want inactive", i, result.State)
+		}
+	}
+	result := d.Observe(sample(start.Add(2*time.Minute), 80, 5000, -1500, 0, 3500))
+	if result.State != Inactive {
+		t.Fatalf("after two minutes state=%s want inactive below energy threshold", result.State)
+	}
+	result = d.Observe(sample(start.Add(6*time.Minute+time.Second), 80, 5000, -1500, 0, 3500))
+	if result.State != SuspectActive {
+		t.Fatalf("after sufficient excess energy state=%s want suspected_active", result.State)
+	}
+}
+
+func TestDetectorIgnoresStormDrivenHouseSupport(t *testing.T) {
+	start := time.Date(2026, 6, 22, 13, 0, 0, 0, time.UTC)
+	d := New(DefaultConfig(20), Snapshot{})
+
+	// A storm removes most PV for an extended period. The battery supplies the
+	// solar deficit, but does not dispatch energy beyond what the house needs.
+	for i := range 31 {
+		result := d.Observe(sample(start.Add(time.Duration(i)*time.Minute), 80-float64(i)*0.2, 4000, 0, 1000, 5000))
+		if result.State != Inactive || result.Transition != NoTransition {
+			t.Fatalf("after %d minutes state=%s transition=%q want inactive", i, result.State, result.Transition)
+		}
+	}
+}
+
 func TestDetectorIgnoresBatteryServingACLoad(t *testing.T) {
 	start := time.Date(2026, 6, 18, 15, 0, 0, 0, time.UTC)
 	d := New(DefaultConfig(20), Snapshot{})

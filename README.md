@@ -77,8 +77,8 @@ inactive -> suspected_active -> active -> suspected_ended -> inactive
 
 Default behavior:
 
-- Suspects an event after 3 consecutive polls where the battery is discharging at or above `1000 W`, SOC is above reserve, and there is export/surplus evidence.
-- Export/surplus evidence means either grid export is at least `500 W`, or battery discharge exceeds the house's net demand after PV by at least `750 W`.
+- Suspects an event after at least 30 continuous seconds of battery discharge above the house's solar deficit and at least `150 Wh` of that excess energy accumulates within 10 minutes. This is independent of the selected polling interval.
+- Excess dispatch is battery discharge minus the portion needed to cover house consumption after PV. Long periods of ordinary self-consumption therefore contribute no evidence, while short solar-control overshoots contribute too little energy.
 - Confirms an event if SOC drops by at least `2%` within 20 minutes while discharge remains sustained.
 - Above reserve, suspects an event ended when discharge remains below `300 W` for 10 minutes. At reserve, idle/no-discharge is ambiguous because DR can suppress recharging; the detector remains active until charging at `300 W` or more resumes for 10 minutes.
 - Confirms the event ended after 15 minutes without sustained discharge.
@@ -147,7 +147,9 @@ Command-line flags can also be used:
 -smtp-from       sender email address
 -smtp-to         recipient email address
 -log-file        combined text log, default envoy.log
--debug           enable debug logs and save raw API responses under debug/
+-debug           enable DEBUG log records, including per-poll telemetry
+-dump-api-responses
+                 save raw gateway API responses under debug/
 ```
 
 ## Run a Precompiled Release
@@ -221,13 +223,15 @@ This restores active and provisional detector timing after a restart and retains
 
 ## Logging and Diagnostics
 
-The app uses Go's structured `slog` logger. Normal operation and state transitions are `INFO`, a confirmed grid outage is `WARN`, and failed operations are `ERROR`. Logs go to both standard output and the file selected by `-log-file`/`LOGFILE`; source locations are included. Passing `-debug` also enables `DEBUG` records, including per-poll telemetry samples.
+The app uses Go's structured `slog` logger. Normal operation and state transitions are `INFO`, a confirmed grid outage is `WARN`, and failed operations are `ERROR`. Logs go to both standard output and the file selected by `-log-file`/`LOGFILE`; source locations are included. Passing `-debug` enables `DEBUG` records, including per-poll telemetry samples, without saving raw API responses. Debug logging can also be enabled with `DRLISTENER_DEBUG=true`.
 
-Debug mode calls several auxiliary gateway endpoints on every poll and saves
-their raw responses under `debug/` for offline investigation. Those calls are
+Passing `-dump-api-responses` calls several auxiliary gateway endpoints on
+every poll and saves their raw responses under `debug/` for offline
+investigation. It can also be enabled with
+`DRLISTENER_DUMP_API_RESPONSES=true`. Those calls are
 best-effort and do not stop normal live-data polling if one fails. Short
 runtime polling intervals therefore produce substantially more gateway traffic
-and debug files. Debug files may contain system telemetry, so review them
+and response files. These files may contain system telemetry, so review them
 before sharing.
 
 ## Tests

@@ -93,3 +93,10 @@ func TestFormatPollInterval(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatFreshnessUsesSingularMinute(t *testing.T) {
+	now := time.Date(2026, 6, 22, 14, 0, 0, 0, time.UTC)
+	if got := formatFreshness(now.Add(-time.Minute), now); got != "1 minute ago" {
+		t.Fatalf("formatFreshness()=%q want %q", got, "1 minute ago")
+	}
+}
